@@ -57,7 +57,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
     // 1. Buscar en el Boletín (base de datos local de marcas publicadas/solicitadas)
     const enBoletinMismaClase = await prisma.boletinEntrada.findMany({
       where: { claseNiza },
-      select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true, fechaPublicacion: true },
+      select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true },
     });
 
     // 2. Buscar en marcas registradas propias del sistema
