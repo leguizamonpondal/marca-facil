@@ -1,0 +1,8 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm ci && npm run build"
+
+[deploy]
+# Railway sirve el directorio dist/ como sitio estático
+startCommand = "npx serve dist -p $PORT"
+healthcheckPath = "/"

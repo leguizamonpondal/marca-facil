@@ -1,0 +1,524 @@
+// MARCAS FÁCIL — Schema de base de datos PostgreSQL + Prisma
+// Honorio M. Leguizamón Pondal — Agente PI Mat. N° 1974
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // DIRECT_URL necesaria para migraciones con Supabase Transaction Pooler
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================================
+// USUARIOS Y AUTENTICACIÓN
+// ============================================================
+
+model User {
+  id              String   @id @default(uuid())
+  cuit            String   @unique          // CUIT sin guiones, 11 dígitos
+  email           String   @unique
+  passwordHash    String
+  razonSocial     String                    // Nombre o razón social del titular
+  tipoPersona     TipoPersona @default(FISICA)
+  domicilio       String?
+  telefono        String?
+
+  // Red de referidos
+  referralCode    String?  @unique          // Código propio del usuario
+  referredByCode  String?                   // Código del agente/reseller que lo refirió
+  agenteCuit      String?                   // CUIT del agente asignado (default: Honorio)
+
+  // Suscripción
+  plan            Plan     @default(GRATUITO)
+  planVencimiento DateTime?
+  mpCustomerId    String?                   // ID de cliente en MercadoPago
+
+  // Estado y control
+  activo          Boolean  @default(true)
+  emailVerified   Boolean  @default(false)
+  terminosAceptados Boolean @default(false)
+  terminosVersion String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  lastLoginAt     DateTime?
+
+  // Relaciones
+  pushTokens      PushToken[]
+  marcas          Marca[]
+  dominios        Dominio[]
+  alertas         Alerta[]
+  pagos           Pago[]
+  estudiosFactibilidad EstudioFactibilidad[]
+
+  @@index([cuit])
+  @@index([email])
+  @@index([referredByCode])
+  @@map("users")
+}
+
+model PushToken {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  platform  String   // "ios" | "android" | "web"
+  activo    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@map("push_tokens")
+}
+
+// ============================================================
+// MARCAS
+// ============================================================
+
+model Marca {
+  id              String       @id @default(uuid())
+  userId          String
+
+  // Datos del registro INPI
+  acta            String?      // Número de acta (ej: "4500123")
+  resolucion      String?      // Número de resolución si fue concedida
+  denominacion    String
+  tipoMarca       TipoMarca    @default(DENOMINATIVA)
+  claseNiza       Int          // 1-45
+  productos       String       // Descripción de productos/servicios
+
+  // Titular
+  titularCuit     String
+  titularNombre   String
+
+  // Estado y fechas
+  estado          EstadoMarca  @default(BORRADOR)
+  fechaIngreso    DateTime?    // Presentación ante INPI
+  fechaPublicacion DateTime?   // Publicación en Boletín de Marcas
+  fechaConcesion  DateTime?    // Fecha de concesión
+  fechaVencimiento DateTime?   // 10 años desde concesión
+
+  // DDJJ de uso (Art. 26 Ley 22.362) — año 6 desde concesión
+  ddjjUsoPresentada Boolean    @default(false)
+  ddjjUsoFecha      DateTime?
+  ddjjVencimiento   DateTime?  // Cierre de la ventana (año 7)
+
+  // Logo / imagen (para figurativas y mixtas)
+  logoUrl         String?
+
+  // Agente que presentó
+  agenteCuit      String?
+
+  // Vigilancia automática contra el Boletín
+  vigilanciaActiva Boolean    @default(true)
+
+  notas           String?
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  oposicionesFormuladas Oposicion[] @relation("MarcaOponente")   // Oposiciones que ESTA marca formuló
+  oposicionesRecibidas  Oposicion[] @relation("MarcaOpuesta")    // Oposiciones CONTRA esta marca
+  alertas         Alerta[]
+  documentos      Documento[]
+  estudiosFactibilidad EstudioFactibilidad[]
+
+  @@index([userId])
+  @@index([claseNiza])
+  @@index([denominacion])
+  @@index([estado])
+  @@map("marcas")
+}
+
+// ============================================================
+// BOLETÍN DE MARCAS (publicado todos los MIÉRCOLES)
+// ============================================================
+
+model BoletinEntrada {
+  id              String   @id @default(uuid())
+  fechaBoletin    DateTime // Miércoles de publicación
+  boletinNumero   String?  // Número del boletín
+
+  // Datos de la marca publicada en el boletín
+  acta            String   @unique
+  denominacion    String
+  tipoMarca       String   @default("DENOMINATIVA")
+  claseNiza       Int
+  titularNombre   String   @default("No informado")
+  titularCuit     String?
+  productos       String?
+
+  // Control de procesamiento
+  procesado       Boolean  @default(false) // Si ya se cruzó con marcas del sistema
+  createdAt       DateTime @default(now())
+
+  oposicionesGeneradas Oposicion[] @relation("BoletinOrigen")
+
+  @@index([fechaBoletin])
+  @@index([claseNiza])
+  @@index([denominacion])
+  @@map("boletin_entradas")
+}
+
+model BoletinDescarga {
+  id             String   @id @default(uuid())
+  fechaBoletin   DateTime // Miércoles al que corresponde
+  boletinNumero  String?
+  urlDescargada  String?
+  exitosa        Boolean  @default(false)
+  totalActas     Int      @default(0)
+  error          String?
+  descargadoEn   DateTime @default(now())
+
+  @@index([fechaBoletin])
+  @@map("boletin_descargas")
+}
+
+// ============================================================
+// OPOSICIONES
+// Flujo Res. INPI 297/2026 (vigente para marcas desde 01/03/2026)
+// ============================================================
+
+model Oposicion {
+  id              String          @id @default(uuid())
+  userId          String
+
+  // Marca que opone (propia del usuario)
+  marcaOponenteId String
+
+  // Marca opuesta (del Boletín o ingresada manualmente)
+  boletinEntradaId String?
+  marcaOpuestaId   String?
+  actaOpuesta      String
+  denominacionOpuesta String
+  claseOpuesta     Int
+  oponenteNombre   String?        // Nombre del titular de la marca opuesta
+  oponenteCuit     String?
+
+  // Datos de la oposición
+  numeroOposicion  String?        // N° asignado por INPI al formular
+  fechaPublicacion DateTime       // Publicación en boletín (para calcular plazo)
+  plazoOposicion   DateTime?      // 30 días corridos desde el día siguiente a publicación
+  fechaPresentacion DateTime?     // Fecha real de presentación ante INPI
+
+  // Fundamentos
+  fundamentosTexto String?        @db.Text
+
+  // Estado del trámite
+  estado           EstadoOposicion @default(PENDIENTE)
+
+  // Mantenimiento — Art. 1 Res. 297/2026 (15 días hábiles)
+  notificacionMantenimiento DateTime?
+  plazoMantenimiento        DateTime?
+  fechaMantenimiento        DateTime?  // Cuándo se presentó el mantenimiento
+
+  // Traslado al solicitante — Art. 2 Res. 297/2026 (15 días hábiles)
+  trasladoFecha    DateTime?
+  plazoTraslado    DateTime?
+
+  // Argumentos finales — Art. 6 Res. 297/2026 (10 días hábiles)
+  argumentosFinales String?        @db.Text
+
+  // Resolución del INPI
+  resolucionFecha  DateTime?
+  resolucionNumero String?
+  resolucionTexto  String?        @db.Text
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  marcaOponente    Marca    @relation("MarcaOponente", fields: [marcaOponenteId], references: [id])
+  marcaOpuesta     Marca?   @relation("MarcaOpuesta", fields: [marcaOpuestaId], references: [id])
+  boletinEntrada   BoletinEntrada? @relation("BoletinOrigen", fields: [boletinEntradaId], references: [id])
+  alertas          Alerta[]
+  documentos       Documento[]
+
+  @@index([userId])
+  @@index([estado])
+  @@index([actaOpuesta])
+  @@map("oposiciones")
+}
+
+// ============================================================
+// DOMINIOS NIC.AR
+// ============================================================
+
+model Dominio {
+  id              String        @id @default(uuid())
+  userId          String
+  nombre          String        @unique  // ej: "mimarca.com.ar"
+  estado          EstadoDominio @default(ACTIVO)
+  fechaRegistro   DateTime?
+  fechaVencimiento DateTime?
+  registrante     String?       // Nombre del registrante
+  notas           String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alertas         Alerta[]
+
+  @@index([userId])
+  @@map("dominios")
+}
+
+// ============================================================
+// ALERTAS Y CALENDARIO DE VENCIMIENTOS
+// ============================================================
+
+model Alerta {
+  id              String       @id @default(uuid())
+  userId          String
+  tipo            TipoAlerta
+  titulo          String
+  descripcion     String?
+
+  // Referencias (todas opcionales)
+  marcaId         String?
+  oposicionId     String?
+  dominioId       String?
+
+  // Fechas
+  fechaVencimiento DateTime?   // Cuando vence el plazo
+  fechaAlerta     DateTime?    // Cuándo se debe notificar/mostrar
+
+  // Estado
+  leida           Boolean      @default(false)
+  leidaEn         DateTime?
+  notificadaPush  Boolean      @default(false)
+
+  createdAt       DateTime @default(now())
+
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marca           Marca?     @relation(fields: [marcaId], references: [id])
+  oposicion       Oposicion? @relation(fields: [oposicionId], references: [id])
+  dominio         Dominio?   @relation(fields: [dominioId], references: [id])
+
+  @@index([userId])
+  @@index([fechaVencimiento])
+  @@index([leida])
+  @@index([notificadaPush])
+  @@map("alertas")
+}
+
+// ============================================================
+// DOCUMENTOS GENERADOS
+// ============================================================
+
+model Documento {
+  id          String        @id @default(uuid())
+  userId      String
+  tipo        TipoDocumento
+  nombre      String
+  descripcion String?
+  url         String        // Path local o URL de storage
+  mimeType    String        @default("application/pdf")
+
+  // Referencias opcionales
+  marcaId     String?
+  oposicionId String?
+
+  createdAt   DateTime @default(now())
+
+  marca       Marca?     @relation(fields: [marcaId], references: [id])
+  oposicion   Oposicion? @relation(fields: [oposicionId], references: [id])
+
+  @@index([userId])
+  @@index([marcaId])
+  @@map("documentos")
+}
+
+// ============================================================
+// PAGOS — MercadoPago
+// ============================================================
+
+model Pago {
+  id              String      @id @default(uuid())
+  userId          String
+  mpPaymentId     String?     @unique   // ID de pago en MercadoPago
+  mpPreferenceId  String?               // ID de preferencia creada
+  tipo            TipoPago
+  monto           Float
+  moneda          String      @default("ARS")
+  estado          EstadoPago  @default(PENDIENTE)
+  estadoMP        String?     // Estado raw de MercadoPago
+  concepto        String?     // Descripción legible del pago
+  planContratado  String?     // Plan que se contrató con este pago
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user            User        @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([mpPaymentId])
+  @@index([estado])
+  @@map("pagos")
+}
+
+// ============================================================
+// RESELLERS / AGENTES / RED DE DISTRIBUCIÓN
+// ============================================================
+
+model Reseller {
+  id            String   @id @default(uuid())
+  nombre        String
+  email         String   @unique
+  cuit          String   @unique
+  matricula     String?  // Matrícula profesional (abogado, agente PI, etc.)
+  tipoAgente    String   @default("referidor") // "abogado" | "agente_pi" | "estudio" | "camara" | "referidor"
+  referralCode  String   @unique
+  activo        Boolean  @default(true)
+  comisionPct   Float    @default(10)         // Porcentaje de comisión
+  notas         String?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("resellers")
+}
+
+// ============================================================
+// ESTUDIOS DE FACTIBILIDAD (histórico)
+// ============================================================
+
+model EstudioFactibilidad {
+  id                    String   @id @default(uuid())
+  userId                String
+  marcaId               String?  // Si se vincula a una marca existente
+
+  // Datos del análisis
+  denominacion          String
+  claseNiza             Int
+  tipoMarca             String   @default("DENOMINATIVA")
+  productos             String?
+
+  // Resultados
+  antecedentes          String?  @db.Text  // JSON de antecedentes encontrados
+  dictamen              String   // "VIABLE" | "CONDICIONADA" | "NO_VIABLE"
+  riesgo                String   // "BAJO" | "MEDIO" | "ALTO"
+  resumenDictamen       String?  @db.Text
+  totalAntecedentes     Int      @default(0)
+  antecedentesConfundibles Int   @default(0)
+
+  // PDF generado
+  pdfUrl                String?
+
+  createdAt             DateTime @default(now())
+
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  marca                 Marca?   @relation(fields: [marcaId], references: [id])
+
+  @@index([userId])
+  @@index([denominacion])
+  @@map("estudios_factibilidad")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum TipoPersona {
+  FISICA
+  JURIDICA
+}
+
+enum Plan {
+  GRATUITO
+  BASICO
+  PROFESIONAL
+  EMPRESARIAL
+}
+
+enum TipoMarca {
+  DENOMINATIVA
+  FIGURATIVA
+  MIXTA
+  TRIDIMENSIONAL
+  SONORA
+  OLFATIVA
+  SECUENCIAL
+  TACTIL
+  COMBINACION_COLORES
+  POSICION
+}
+
+enum EstadoMarca {
+  BORRADOR            // Ingresada en el sistema, no presentada aún
+  EN_TRAMITE          // Presentada en INPI, en examen de forma
+  PUBLICADA           // Publicada en Boletín (30 días de oposición)
+  CONCEDIDA           // Registrada y concedida
+  RECHAZADA           // Rechazada por el INPI
+  ABANDONADA          // Abandonada por el titular
+  VENCIDA             // Vencido el plazo de 10 años sin renovar
+}
+
+enum EstadoOposicion {
+  PENDIENTE           // Detectada automáticamente, aún no presentada
+  FORMULADA           // Presentada en el portal INPI (30 días)
+  EN_TRAMITE          // En trámite general
+  MANTENIDA           // Mantenimiento presentado (Art. 1 Res. 297/2026)
+  FUNDADA             // INPI declaró la oposición FUNDADA
+  INFUNDADA           // INPI declaró la oposición INFUNDADA
+  DESISTIDA           // Retirada por el oponente
+  ABANDONADA          // Caducó por no mantenerla en plazo
+}
+
+enum EstadoDominio {
+  ACTIVO
+  VENCIDO
+  EN_DISPUTA
+  CEDIDO
+  SUSPENDIDO
+}
+
+enum TipoAlerta {
+  OPOSICION_DETECTADA      // Marca confundible en Boletín — urgente
+  OPOSICION_PLAZO          // Plazo para presentar oposición (30 días corridos)
+  OPOSICION_MANTENIMIENTO  // Mantener oposición — 15 días hábiles (Art. 1 Res. 297/2026)
+  OPOSICION_TRASLADO       // Traslado al solicitante — 15 días hábiles (Art. 2)
+  DDJJ_VENCIMIENTO         // Vence DDJJ de uso de medio término (Art. 26 Ley 22.362)
+  RENOVACION_VENCIMIENTO   // Vence el registro (10 años)
+  DOMINIO_VENCIMIENTO      // Vence dominio NIC.AR
+  VISTA_OFICIAL            // Vista de forma o de fondo del INPI
+  MARCA_CONCEDIDA          // Marca concedida — notificación positiva
+  CUSTOM                   // Alerta personalizada del usuario
+  GENERAL
+}
+
+enum TipoDocumento {
+  SOLICITUD_NUEVA
+  OPOSICION
+  MANTENIMIENTO_OPOSICION
+  CONTESTACION_TRASLADO
+  ARGUMENTOS_FINALES
+  DDJJ_USO_MEDIO_TERMINO
+  DDJJ_USO_RENOVACION
+  CONTESTACION_VISTA
+  LIMITACION
+  RENOVACION
+  ESTUDIO_FACTIBILIDAD
+  TITULO_MARCA
+  OTRO
+}
+
+enum TipoPago {
+  SUSCRIPCION
+  PAGO_UNICO
+  SOLICITUD_MARCA
+  OPOSICION_ARANCEL
+  MANTENIMIENTO_OPOSICION
+  RENOVACION_MARCA
+  DDJJ_USO
+  DOMINIO_REGISTRO
+  DOMINIO_RENOVACION
+  ESTUDIO_FACTIBILIDAD
+}
+
+enum EstadoPago {
+  PENDIENTE
+  APROBADO
+  RECHAZADO
+  DEVUELTO
+}
