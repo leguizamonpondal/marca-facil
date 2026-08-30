@@ -155,8 +155,8 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
         fechaVencimiento,
         ddjjVencimiento,
         estado: data.estado || 'BORRADOR',
-        vigilanciaActiva: data.vigilanciaActiva ?? true,
-      },
+               vigilanciaActiva: data.vigilanciaActiva ?? true,
+      } as any,
     });
 
     // Si tiene fecha de vencimiento, crear alerta
