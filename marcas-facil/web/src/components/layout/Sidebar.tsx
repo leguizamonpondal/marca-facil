@@ -73,7 +73,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
             <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
               <Scale className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-gray-900 text-lg">MARCAS FÁCIL</span>
+            <span className="font-bold text-gray-900 text-lg">MARCA FACIL</span>
           </div>
           <button
             onClick={onClose}
