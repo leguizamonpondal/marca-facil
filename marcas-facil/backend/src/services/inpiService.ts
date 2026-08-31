@@ -1,4 +1,3 @@
-
 /**
  * Servicio de integración con el portal INPI (Trámites en Línea)
  * Autenticación vía ARCA (ex-AFIP) Clave Fiscal nivel 2+
@@ -197,13 +196,17 @@ export async function consultarEstadoActa(
  
 // ── Búsqueda de marcas por denominación en INPI (para factibilidad) ──────────
 /**
- * Busca marcas en el registro público del INPI por denominación y clase.
- * No requiere autenticación. Usado por el estudio de factibilidad.
+ * Busca marcas en el registro argentino del INPI por denominación y clase.
+ * No requiere autenticación.
  *
- * Estrategia:
- *   1. Intenta la API REST pública del INPI (rápida, ~1s)
- *   2. Si falla, scrapea el portal público vía Playwright (~20s)
- *   3. Si ambas fallan, devuelve [] sin tirar error (degradación elegante)
+ * Estrategia (en orden):
+ *   1. TMView API — base de datos internacional que incluye INPI Argentina.
+ *      Confiable, sin scraping, respuesta JSON directa.
+ *   2. Playwright sobre el portal público del INPI — fallback si TMView falla.
+ *   3. Si ambas fallan, devuelve [] sin tirar error (degradación elegante).
+ *
+ * TMView (tmdn.org) agrega datos del INPI Argentina y es la fuente más confiable
+ * para consultas automatizadas sin autenticación.
  */
 export interface MarcaINPI {
   acta: string;
@@ -215,46 +218,73 @@ export interface MarcaINPI {
   fechaPublicacion?: string;
 }
  
+/**
+ * Busca en TMView (Trademark Vision) — incluye registro argentino del INPI.
+ * API pública, sin autenticación, respuesta JSON.
+ * Docs: https://www.tmdn.org/tmview/swagger-ui.html
+ */
+async function buscarEnTMView(denominacion: string, clase: number): Promise<MarcaINPI[]> {
+  const { default: axios } = await import('axios');
+ 
+  try {
+    // TMView REST API — búsqueda por denominación en territorio Argentina (AR)
+    const url = 'https://www.tmdn.org/tmview/api/trademark/search';
+    const params = {
+      page: 1,
+      pageSize: 50,
+      territories: 'AR',            // Argentina = INPI
+      niceclasses: String(clase),
+      term: denominacion,
+      trademarkStatus: '',           // todas: registradas, en trámite, etc.
+      trademarkType: '',
+    };
+ 
+    const { data } = await axios.get(url, {
+      params,
+      timeout: 15_000,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'MarcaFacil/1.0 (trademark research tool)',
+        'Referer': 'https://www.tmdn.org/tmview/',
+      },
+    });
+ 
+    const trademarks: any[] = data?.trademarks || data?.results || data?.items || [];
+    if (trademarks.length === 0) {
+      logger.info(`[TMView] Sin resultados para "${denominacion}" clase ${clase} en AR`);
+      return [];
+    }
+ 
+    logger.info(`[TMView] ${trademarks.length} marcas encontradas para "${denominacion}" clase ${clase} en AR`);
+ 
+    return trademarks.map((tm: any) => ({
+      acta: tm.applicationNumber || tm.registrationNumber || tm.st13 || '',
+      denominacion: tm.trademarkName || tm.wordElements || tm.name || '',
+      claseNiza: clase,
+      titular: (tm.holders?.[0]?.name || tm.applicant || tm.owner || '').trim(),
+      estado: tm.trademarkStatus || tm.status || '',
+      fechaSolicitud: tm.applicationDate || undefined,
+      fechaPublicacion: tm.publicationDate || undefined,
+    })).filter(m => m.denominacion.length > 0);
+ 
+  } catch (err: any) {
+    logger.warn(`[TMView] Error consultando API: ${err.message}`);
+    return [];
+  }
+}
+ 
 export async function buscarMarcasPublicoINPI(
   denominacion: string,
   clase: number,
 ): Promise<MarcaINPI[]> {
-  const { default: axios } = await import('axios');
-  const denomEnc = encodeURIComponent(denominacion);
- 
-  // Endpoints conocidos de la API pública INPI (orden de preferencia)
-  const apiCandidatos = [
-    `https://portaltramites.inpi.gob.ar/marcasconsultas/api/busqueda?denominacion=${denomEnc}&clase=${clase}`,
-    `https://www.inpi.gob.ar/rest/consulta/marcas?denominacion=${denomEnc}&clase=${clase}`,
-    `https://www.inpi.gob.ar/rest/consulta/marcas?q=${denomEnc}&clase=${clase}`,
-  ];
- 
-  for (const url of apiCandidatos) {
-    try {
-      const { data } = await axios.get(url, {
-        timeout: 8_000,
-        headers: { Accept: 'application/json', 'User-Agent': 'MarcaFacil/1.0' },
-      });
-      const lista = Array.isArray(data) ? data : (data?.marcas || data?.resultados || data?.items || []);
-      if (lista.length > 0) {
-        logger.info(`[INPI] API pública devolvió ${lista.length} resultados para "${denominacion}" clase ${clase}`);
-        return lista.map((item: any) => ({
-          acta: String(item.acta || item.nroActa || item.expediente || ''),
-          denominacion: item.denominacion || item.nombre || '',
-          claseNiza: parseInt(item.claseNiza || item.clase || clase) || clase,
-          titular: item.titular || item.titularNombre || item.solicitante || '',
-          estado: item.estado || item.estadoTramite || '',
-          fechaSolicitud: item.fechaSolicitud || item.fechaPresentacion || undefined,
-          fechaPublicacion: item.fechaPublicacion || item.fechaBoletin || undefined,
-        }));
-      }
-    } catch (err: any) {
-      logger.debug(`[INPI] API pública ${url} no disponible: ${err.message}`);
-    }
+  // 1. Intentar TMView (fuente principal — incluye INPI Argentina, sin scraping)
+  const resultadosTMView = await buscarEnTMView(denominacion, clase);
+  if (resultadosTMView.length > 0) {
+    return resultadosTMView;
   }
  
-  // Fallback: scraping del portal público vía Playwright
-  logger.info(`[INPI] Usando Playwright para buscar "${denominacion}" clase ${clase} en portal público`);
+  // 2. Fallback: Playwright sobre portal público INPI
+  logger.info(`[INPI] TMView sin resultados — usando Playwright para "${denominacion}" clase ${clase}`);
   return buscarMarcasPlaywright(denominacion, clase);
 }
  
@@ -611,3 +641,4 @@ export async function presentarSolicitud(
     await browser.close();
   }
 }
+ 
