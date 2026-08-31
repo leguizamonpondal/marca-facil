@@ -22,6 +22,7 @@ import factibilidadRoutes from './api/routes/factibilidad';
 import inpiRoutes from './api/routes/inpi';
 
 const app = express();
+app.set('trust proxy', 1); // Railway usa proxy reverso
 const PORT = process.env.PORT || 3001;
 
 // ── Seguridad y middleware base ──────────────────────────────────────────────
