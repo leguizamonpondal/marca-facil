@@ -1,3 +1,4 @@
+
 /**
  * Rutas de Estudio de Factibilidad — MARCA FÁCIL
  *
@@ -26,9 +27,46 @@ import * as path from 'path';
 import { buscarMarcasPublicoINPI } from '../../services/inpiService';
  
 const router = Router();
-router.use(authenticate);
  
 const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
+ 
+// ── GET /api/factibilidad/test — Diagnóstico de búsqueda INPI (SIN auth) ──────
+// Ejemplo: GET /api/factibilidad/test?denominacion=ADIDAS&clase=25
+router.get('/test', async (req: any, res: Response) => {
+  const denominacion = String(req.query.denominacion || 'ADIDAS');
+  const clase = parseInt(String(req.query.clase || '25'));
+  const resultado: Record<string, any> = { denominacion, clase, fuentes: {} };
+ 
+  // Probar TMView
+  try {
+    const { default: axios } = await import('axios');
+    const url = 'https://www.tmdn.org/tmview/api/trademark/search';
+    const { data, status } = await axios.get(url, {
+      params: { page: 1, pageSize: 10, territories: 'AR', niceclasses: String(clase), term: denominacion },
+      timeout: 15_000,
+      headers: { Accept: 'application/json', 'User-Agent': 'MarcaFacil/1.0', Referer: 'https://www.tmdn.org/tmview/' },
+    });
+    resultado.fuentes.tmview = { status, total: data?.trademarks?.length ?? data?.results?.length ?? 0, sample: data?.trademarks?.[0] ?? data?.results?.[0] ?? null, rawKeys: Object.keys(data || {}) };
+  } catch (err: any) {
+    resultado.fuentes.tmview = { error: err.message, code: err.code, httpStatus: err.response?.status };
+  }
+ 
+  // Probar INPI directo
+  try {
+    const { default: axios } = await import('axios');
+    const { data, status } = await axios.get(
+      `https://portaltramites.inpi.gob.ar/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
+      { timeout: 10_000, headers: { 'User-Agent': 'Mozilla/5.0' } }
+    );
+    resultado.fuentes.inpiPortal = { status, bodyLength: String(data).length };
+  } catch (err: any) {
+    resultado.fuentes.inpiPortal = { error: err.message, code: err.code, httpStatus: err.response?.status };
+  }
+ 
+  res.json(resultado);
+});
+ 
+router.use(authenticate);
  
 // ── GET /api/factibilidad — Historial de estudios ─────────────────────────────
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
