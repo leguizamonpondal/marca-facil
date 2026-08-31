@@ -55,31 +55,21 @@ router.get('/test', async (req: any, res: Response) => {
     resultado.fuentes.inpiPortal = { error: err.message, code: err.code, httpStatus: err.response?.status };
   }
  
-  // Probar Playwright sobre el portal INPI
+  // Probar POST directo al formulario INPI
   try {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    const page = await browser.newPage();
-    await page.goto(INPI_URL, { waitUntil: 'networkidle', timeout: 30_000 });
-    const pageTitle = await page.title();
-    const inputs = await page.locator('input:visible').all();
-    const inputInfos = await Promise.all(inputs.slice(0, 15).map(async i => ({
-      name: await i.getAttribute('name').catch(() => ''),
-      id: await i.getAttribute('id').catch(() => ''),
-      type: await i.getAttribute('type').catch(() => ''),
-      placeholder: await i.getAttribute('placeholder').catch(() => ''),
-    })));
-    const selects = await page.locator('select:visible').all();
-    const selectInfos = await Promise.all(selects.slice(0, 10).map(async s => ({
-      name: await s.getAttribute('name').catch(() => ''),
-      id: await s.getAttribute('id').catch(() => ''),
-      options: await s.locator('option').allTextContents().catch(() => [] as string[]),
-    })));
-    const buttons = await page.locator('button:visible, input[type="submit"]:visible').allTextContents();
-    await browser.close();
-    resultado.fuentes.playwright = { pageTitle, inputs: inputInfos, selects: selectInfos, buttons };
+    const { default: axios } = await import('axios');
+    const qs = await import('querystring');
+    const body = qs.stringify({ tipob: '1', Denominacion: denominacion, TxtDenominacionTipoBusqueda: '1', clase: String(clase), vigentes: 'true', BtnBuscarAvanzada: 'BUSCAR' });
+    const { data, status } = await axios.post('https://portaltramites.inpi.gob.ar/MarcasConsultas/Grilla', body, {
+      timeout: 20_000,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', 'Referer': INPI_URL, 'Origin': 'https://portaltramites.inpi.gob.ar' },
+    });
+    const html = String(data);
+    const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].length;
+    const snippet = html.slice(0, 1000);
+    resultado.fuentes.inpiPost = { status, bodyLength: html.length, filas, snippet };
   } catch (err: any) {
-    resultado.fuentes.playwright = { error: err.message };
+    resultado.fuentes.inpiPost = { error: err.message, httpStatus: err.response?.status };
   }
  
   res.json(resultado);
@@ -450,4 +440,3 @@ async function generarPDFFactibilidad(params: {
 }
  
 export default router;
- 
