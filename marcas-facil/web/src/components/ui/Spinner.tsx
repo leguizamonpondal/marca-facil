@@ -30,7 +30,7 @@ export function FullPageLoader() {
   return (
     <div className="fixed inset-0 flex items-center justify-center bg-white z-50">
       <div className="flex flex-col items-center gap-4">
-        <div className="text-2xl font-bold text-primary-600">MARCAS FÁCIL</div>
+        <div className="text-2xl font-bold text-primary-600">MARCA FACIL</div>
         <Spinner size="lg" />
       </div>
     </div>
