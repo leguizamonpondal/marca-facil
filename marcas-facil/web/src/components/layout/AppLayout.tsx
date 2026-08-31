@@ -43,7 +43,7 @@ export function AppLayout() {
             <Menu className="w-5 h-5" />
           </button>
 
-          <div className="lg:hidden text-base font-bold text-gray-900">MARCAS FÁCIL</div>
+          <div className="lg:hidden text-base font-bold text-gray-900">MARCA FACIL</div>
           <div className="hidden lg:block" /> {/* Spacer */}
 
           <div className="flex items-center gap-2">
