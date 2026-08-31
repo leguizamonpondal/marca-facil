@@ -32,32 +32,22 @@ router.post('/registro', async (req: Request, res: Response, next: NextFunction)
   try {
     const data = registroSchema.parse(req.body);
 
-    // Verificar CUIT único (1 cuenta por CUIT)
     const existeCuit = await prisma.user.findUnique({ where: { cuit: data.cuit } });
-    if (existeCuit) {
-      throw new AppError(409, 'Ya existe una cuenta registrada con ese CUIT', 'CUIT_EXISTS');
-    }
+    if (existeCuit) throw new AppError(409, 'Ya existe una cuenta registrada con ese CUIT', 'CUIT_EXISTS');
 
     const existeEmail = await prisma.user.findUnique({ where: { email: data.email } });
-    if (existeEmail) {
-      throw new AppError(409, 'Ya existe una cuenta con ese email', 'EMAIL_EXISTS');
-    }
+    if (existeEmail) throw new AppError(409, 'Ya existe una cuenta con ese email', 'EMAIL_EXISTS');
 
-    // Validar referral code si viene
     let agenteCuit: string | undefined;
     if (data.referralCode) {
       const reseller = await prisma.reseller.findUnique({
         where: { referralCode: data.referralCode, activo: true },
       });
-      // Si el código existe en revendedores, asignar su CUIT como agente
-      // Si no existe en revendedores, buscar en usuarios (referido por cliente)
       if (reseller) agenteCuit = reseller.cuit;
     }
 
     const passwordHash = await bcrypt.hash(data.password, 12);
     const myReferralCode = generateReferralCode(data.cuit);
-
-    // Por defecto: agente es Honorio (Agente PI Mat. N° 1974)
     const DEFAULT_AGENT_CUIT = process.env.DEFAULT_AGENT_CUIT || '20257000000';
 
     const user = await prisma.user.create({
@@ -75,18 +65,66 @@ router.post('/registro', async (req: Request, res: Response, next: NextFunction)
         terminosAceptados: data.terminosAceptados,
         terminosVersion: '1.0',
       },
-      select: {
-        id: true, cuit: true, email: true, razonSocial: true, plan: true, referralCode: true,
-      },
+      select: { id: true, cuit: true, email: true, razonSocial: true, plan: true, referralCode: true },
     });
 
     const token = signToken(user.id);
+    res.status(201).json({ mensaje: '¡Bienvenido a MARCA FÁCIL! Tu cuenta fue creada exitosamente.', token, user });
+  } catch (err) {
+    next(err);
+  }
+});
 
-    res.status(201).json({
-      mensaje: '¡Bienvenido a MARCAS FÁCIL! Tu cuenta fue creada exitosamente.',
-      token,
-      user,
+// ── POST /api/auth/register (alias inglés — frontend usa este endpoint) ──────
+router.post('/register', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = {
+      ...req.body,
+      razonSocial: req.body.razonSocial || req.body.nombre,
+      referralCode: req.body.referralCode || req.body.codigoReseller,
+      terminosAceptados: true,
+    };
+
+    const data = registroSchema.parse(body);
+
+    const existeCuit = await prisma.user.findUnique({ where: { cuit: data.cuit } });
+    if (existeCuit) throw new AppError(409, 'Ya existe una cuenta registrada con ese CUIT', 'CUIT_EXISTS');
+
+    const existeEmail = await prisma.user.findUnique({ where: { email: data.email } });
+    if (existeEmail) throw new AppError(409, 'Ya existe una cuenta con ese email', 'EMAIL_EXISTS');
+
+    let agenteCuit: string | undefined;
+    if (data.referralCode) {
+      const reseller = await prisma.reseller.findUnique({
+        where: { referralCode: data.referralCode, activo: true },
+      });
+      if (reseller) agenteCuit = reseller.cuit;
+    }
+
+    const passwordHash = await bcrypt.hash(data.password, 12);
+    const myReferralCode = generateReferralCode(data.cuit);
+    const DEFAULT_AGENT_CUIT = process.env.DEFAULT_AGENT_CUIT || '20257000000';
+
+    const user = await prisma.user.create({
+      data: {
+        cuit: data.cuit,
+        email: data.email,
+        passwordHash,
+        razonSocial: data.razonSocial,
+        tipoPersona: data.tipoPersona || 'FISICA',
+        domicilio: data.domicilio,
+        telefono: data.telefono,
+        referralCode: myReferralCode,
+        referredByCode: data.referralCode,
+        agenteCuit: agenteCuit || DEFAULT_AGENT_CUIT,
+        terminosAceptados: data.terminosAceptados,
+        terminosVersion: '1.0',
+      },
+      select: { id: true, cuit: true, email: true, razonSocial: true, plan: true, referralCode: true },
     });
+
+    const token = signToken(user.id);
+    res.status(201).json({ mensaje: '¡Bienvenido a MARCA FÁCIL! Tu cuenta fue creada exitosamente.', token, user });
   } catch (err) {
     next(err);
   }
@@ -98,34 +136,15 @@ router.post('/login', async (req: Request, res: Response, next: NextFunction) =>
     const { email, password } = loginSchema.parse(req.body);
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user || !user.activo) {
-      throw new AppError(401, 'Email o contraseña incorrectos', 'INVALID_CREDENTIALS');
-    }
+    if (!user || !user.activo) throw new AppError(401, 'Email o contraseña incorrectos', 'INVALID_CREDENTIALS');
 
     const match = await bcrypt.compare(password, user.passwordHash);
-    if (!match) {
-      throw new AppError(401, 'Email o contraseña incorrectos', 'INVALID_CREDENTIALS');
-    }
+    if (!match) throw new AppError(401, 'Email o contraseña incorrectos', 'INVALID_CREDENTIALS');
 
-    // Actualizar último login
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() },
-    });
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
     const token = signToken(user.id);
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        cuit: user.cuit,
-        email: user.email,
-        razonSocial: user.razonSocial,
-        plan: user.plan,
-        referralCode: user.referralCode,
-      },
-    });
+    res.json({ token, user: { id: user.id, cuit: user.cuit, email: user.email, razonSocial: user.razonSocial, plan: user.plan, referralCode: user.referralCode } });
   } catch (err) {
     next(err);
   }
@@ -158,7 +177,6 @@ router.put('/perfil', authenticate, async (req: AuthRequest, res: Response, next
       telefono: z.string().optional(),
     });
     const data = schema.parse(req.body);
-
     const user = await prisma.user.update({
       where: { id: req.user!.id },
       data,
