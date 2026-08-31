@@ -1,4 +1,3 @@
-
 /**
  * Rutas de Estudio de Factibilidad — MARCA FÁCIL
  *
@@ -31,36 +30,56 @@ const router = Router();
 const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
  
 // ── GET /api/factibilidad/test — Diagnóstico de búsqueda INPI (SIN auth) ──────
-// Ejemplo: GET /api/factibilidad/test?denominacion=ADIDAS&clase=25
 router.get('/test', async (req: any, res: Response) => {
   const denominacion = String(req.query.denominacion || 'ADIDAS');
   const clase = parseInt(String(req.query.clase || '25'));
   const resultado: Record<string, any> = { denominacion, clase, fuentes: {} };
  
-  // Probar TMView
-  try {
-    const { default: axios } = await import('axios');
-    const url = 'https://www.tmdn.org/tmview/api/trademark/search';
-    const { data, status } = await axios.get(url, {
-      params: { page: 1, pageSize: 10, territories: 'AR', niceclasses: String(clase), term: denominacion },
-      timeout: 15_000,
-      headers: { Accept: 'application/json', 'User-Agent': 'MarcaFacil/1.0', Referer: 'https://www.tmdn.org/tmview/' },
-    });
-    resultado.fuentes.tmview = { status, total: data?.trademarks?.length ?? data?.results?.length ?? 0, sample: data?.trademarks?.[0] ?? data?.results?.[0] ?? null, rawKeys: Object.keys(data || {}) };
-  } catch (err: any) {
-    resultado.fuentes.tmview = { error: err.message, code: err.code, httpStatus: err.response?.status };
-  }
+  const INPI_URL = 'https://portaltramites.inpi.gob.ar/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA';
  
-  // Probar INPI directo
+  // Probar acceso HTTP al portal INPI y capturar estructura del formulario
   try {
     const { default: axios } = await import('axios');
-    const { data, status } = await axios.get(
-      `https://portaltramites.inpi.gob.ar/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
-      { timeout: 10_000, headers: { 'User-Agent': 'Mozilla/5.0' } }
-    );
-    resultado.fuentes.inpiPortal = { status, bodyLength: String(data).length };
+    const { data, status } = await axios.get(INPI_URL, {
+      timeout: 15_000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    const html = String(data);
+    // Extraer inputs y selects para ver la estructura del formulario
+    const inputs = [...html.matchAll(/<input[^>]*>/gi)].map(m => m[0]).slice(0, 20);
+    const selects = [...html.matchAll(/<select[^>]*>/gi)].map(m => m[0]).slice(0, 10);
+    const forms = [...html.matchAll(/<form[^>]*>/gi)].map(m => m[0]).slice(0, 5);
+    const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
+    resultado.fuentes.inpiPortal = { status, bodyLength: html.length, title, forms, inputs, selects, htmlSnippet: html.slice(0, 500) };
   } catch (err: any) {
     resultado.fuentes.inpiPortal = { error: err.message, code: err.code, httpStatus: err.response?.status };
+  }
+ 
+  // Probar Playwright sobre el portal INPI
+  try {
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const page = await browser.newPage();
+    await page.goto(INPI_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+    const pageTitle = await page.title();
+    const inputs = await page.locator('input:visible').all();
+    const inputInfos = await Promise.all(inputs.slice(0, 15).map(async i => ({
+      name: await i.getAttribute('name').catch(() => ''),
+      id: await i.getAttribute('id').catch(() => ''),
+      type: await i.getAttribute('type').catch(() => ''),
+      placeholder: await i.getAttribute('placeholder').catch(() => ''),
+    })));
+    const selects = await page.locator('select:visible').all();
+    const selectInfos = await Promise.all(selects.slice(0, 10).map(async s => ({
+      name: await s.getAttribute('name').catch(() => ''),
+      id: await s.getAttribute('id').catch(() => ''),
+      options: await s.locator('option').allTextContents().catch(() => [] as string[]),
+    })));
+    const buttons = await page.locator('button:visible, input[type="submit"]:visible').allTextContents();
+    await browser.close();
+    resultado.fuentes.playwright = { pageTitle, inputs: inputInfos, selects: selectInfos, buttons };
+  } catch (err: any) {
+    resultado.fuentes.playwright = { error: err.message };
   }
  
   res.json(resultado);
@@ -431,3 +450,4 @@ async function generarPDFFactibilidad(params: {
 }
  
 export default router;
+ 
