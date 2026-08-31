@@ -1,10 +1,10 @@
 /**
- * Rutas de Estudio de Factibilidad — MARCAS FÁCIL
+ * Rutas de Estudio de Factibilidad — MARCA FÁCIL
  *
  * Flujo:
  * 1. Usuario ingresa denominación + clase NIZA
  * 2. Sistema consulta el Boletín (base de datos local) y el registro INPI
- * 3. Aplica algoritmo de confusabilidad sobre marcas similares en la misma clase
+ * 3. Aplica algoritmo de confundibilidad sobre marcas similares en la misma clase
  * 4. Genera PDF con dictamen de factibilidad
  *
  * Niveles de factibilidad:
@@ -12,7 +12,7 @@
  * - CONDICIONADA: Antecedentes colisionantes pero posiblemente coexistibles
  * - NO_VIABLE: Marca idéntica o prácticamente idéntica en la misma clase
  */
-
+ 
 import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../db/client';
@@ -23,12 +23,13 @@ import { logger } from '../../utils/logger';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import * as fs from 'fs';
 import * as path from 'path';
-
+import { buscarMarcasPublicoINPI } from '../../services/inpiService';
+ 
 const router = Router();
 router.use(authenticate);
-
+ 
 const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
-
+ 
 // ── GET /api/factibilidad — Historial de estudios ─────────────────────────────
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
@@ -39,7 +40,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
     res.json(estudios);
   } catch (err) { next(err); }
 });
-
+ 
 // ── POST /api/factibilidad — Ejecutar estudio de factibilidad ─────────────────
 router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
@@ -49,17 +50,17 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       tipoMarca: z.enum(['DENOMINATIVA', 'FIGURATIVA', 'MIXTA']).optional(),
       productos: z.string().optional(),
     });
-
+ 
     const { denominacion, claseNiza, tipoMarca, productos } = schema.parse(req.body);
-
+ 
     logger.info(`🔍 Estudio factibilidad: "${denominacion}" Clase ${claseNiza} — Usuario ${req.user!.id}`);
-
+ 
     // 1. Buscar en el Boletín (base de datos local de marcas publicadas/solicitadas)
     const enBoletinMismaClase = await prisma.boletinEntrada.findMany({
       where: { claseNiza },
       select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true },
     });
-
+ 
     // 2. Buscar en marcas registradas propias del sistema
     const enSistema = await prisma.marca.findMany({
       where: {
@@ -68,10 +69,21 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       },
       select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true, estado: true },
     });
-
-    // 3. Analizar confusabilidad
+ 
+    // 3. Buscar en INPI público (base de datos real del registro)
+    // Se ejecuta en paralelo con el análisis local para no bloquear
+    let marcasINPI: Awaited<ReturnType<typeof buscarMarcasPublicoINPI>> = [];
+    try {
+      marcasINPI = await buscarMarcasPublicoINPI(denominacion, claseNiza);
+      logger.info(`[Factibilidad] INPI público: ${marcasINPI.length} marcas para "${denominacion}" clase ${claseNiza}`);
+    } catch (inpiErr: any) {
+      // No cortar el flujo si INPI falla — igual se analiza la BD local
+      logger.warn(`[Factibilidad] INPI público no disponible (se continúa con BD local): ${inpiErr.message}`);
+    }
+ 
+    // 4. Analizar confundibilidad (tres ejes: gráfico, fonético, ideológico)
     const antecedentes: Array<{
-      fuente: 'BOLETIN' | 'SISTEMA';
+      fuente: 'BOLETIN' | 'SISTEMA' | 'INPI';
       acta: string;
       denominacion: string;
       clase: number;
@@ -81,13 +93,14 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       razon: string;
       estado?: string;
     }> = [];
-
+ 
     // Clases relacionadas a analizar también (criterio jurisprudencial INPI)
     const clasesRelacionadas = getClasesRelacionadas(claseNiza);
-
+ 
+    // Boletín local
     for (const entrada of enBoletinMismaClase) {
       const resultado = esConfundible(denominacion, entrada.denominacion, claseNiza, entrada.claseNiza);
-      if (resultado.similitud >= 50) { // Mostrar cualquier similitud >= 50%
+      if (resultado.similitud >= 50) {
         antecedentes.push({
           fuente: 'BOLETIN',
           acta: entrada.acta,
@@ -100,7 +113,8 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
         });
       }
     }
-
+ 
+    // Marcas del sistema interno
     for (const marca of enSistema) {
       const resultado = esConfundible(denominacion, marca.denominacion, claseNiza, marca.claseNiza);
       if (resultado.similitud >= 50) {
@@ -117,18 +131,41 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
         });
       }
     }
-
+ 
+    // Marcas del registro público INPI (fuente principal)
+    const actasVistas = new Set(antecedentes.map(a => a.acta).filter(Boolean));
+    for (const marca of marcasINPI) {
+      if (!marca.denominacion) continue;
+      // Evitar duplicados si la marca ya estaba en el boletín local
+      if (marca.acta && actasVistas.has(marca.acta)) continue;
+      const resultado = esConfundible(denominacion, marca.denominacion, claseNiza, marca.claseNiza);
+      if (resultado.similitud >= 50) {
+        antecedentes.push({
+          fuente: 'INPI',
+          acta: marca.acta || 'S/N',
+          denominacion: marca.denominacion,
+          clase: marca.claseNiza,
+          titular: marca.titular || 'No informado',
+          similitud: resultado.similitud,
+          confundible: resultado.confundible,
+          razon: resultado.razon,
+          estado: marca.estado || undefined,
+        });
+        if (marca.acta) actasVistas.add(marca.acta);
+      }
+    }
+ 
     // Ordenar por similitud descendente
     antecedentes.sort((a, b) => b.similitud - a.similitud);
-
-    // 4. Determinar factibilidad
+ 
+    // 6. Determinar factibilidad
     const maxSimilitud = antecedentes.length > 0 ? antecedentes[0].similitud : 0;
     const tieneConfundibles = antecedentes.some(a => a.confundible);
-
+ 
     let dictamen: 'VIABLE' | 'CONDICIONADA' | 'NO_VIABLE';
     let riesgo: 'BAJO' | 'MEDIO' | 'ALTO';
     let resumenDictamen: string;
-
+ 
     if (!tieneConfundibles || maxSimilitud < 60) {
       dictamen = 'VIABLE';
       riesgo = 'BAJO';
@@ -142,8 +179,8 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       riesgo = 'ALTO';
       resumenDictamen = `Se detectó un antecedente con similitud del ${maxSimilitud}% (${antecedentes[0].denominacion}). El riesgo de rechazo por confundibilidad es alto. Se recomienda modificar la denominación.`;
     }
-
-    // 5. Generar PDF del estudio
+ 
+    // 7. Generar PDF del estudio
     const pdfPath = await generarPDFFactibilidad({
       denominacion,
       claseNiza,
@@ -156,8 +193,8 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       fecha: new Date(),
       userId: req.user!.id,
     });
-
-    // 6. Guardar en BD
+ 
+    // 8. Guardar en BD
     const estudio = await prisma.estudioFactibilidad.create({
       data: {
         userId: req.user!.id,
@@ -174,7 +211,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
         antecedentesConfundibles: antecedentes.filter(a => a.confundible).length,
       },
     });
-
+ 
     res.json({
       estudio,
       antecedentes,
@@ -185,7 +222,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
     });
   } catch (err) { next(err); }
 });
-
+ 
 // ── GET /api/factibilidad/:id — Detalle de un estudio ────────────────────────
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
@@ -193,14 +230,14 @@ router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) =
       where: { id: req.params.id, userId: req.user!.id },
     });
     if (!estudio) throw new AppError(404, 'Estudio no encontrado', 'ESTUDIO_NOT_FOUND');
-
+ 
     res.json({
       ...estudio,
       antecedentes: estudio.antecedentes ? JSON.parse(estudio.antecedentes as string) : [],
     });
   } catch (err) { next(err); }
 });
-
+ 
 // ── GET /api/factibilidad/:id/pdf — Descargar PDF ─────────────────────────────
 router.get('/:id/pdf', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
@@ -211,13 +248,13 @@ router.get('/:id/pdf', async (req: AuthRequest, res: Response, next: NextFunctio
     if (!estudio.pdfUrl || !fs.existsSync(estudio.pdfUrl)) {
       throw new AppError(404, 'PDF no disponible', 'PDF_NOT_FOUND');
     }
-
+ 
     res.setHeader('Content-Disposition', `attachment; filename="factibilidad-${estudio.denominacion.replace(/\s/g, '_')}.pdf"`);
     res.setHeader('Content-Type', 'application/pdf');
     res.sendFile(estudio.pdfUrl);
   } catch (err) { next(err); }
 });
-
+ 
 // ── Helper: clases NIZA relacionadas ─────────────────────────────────────────
 function getClasesRelacionadas(clase: number): number[] {
   const mapa: Record<number, number[]> = {
@@ -229,7 +266,7 @@ function getClasesRelacionadas(clase: number): number[] {
   };
   return mapa[clase] || [];
 }
-
+ 
 // ── Helper: generar PDF del estudio de factibilidad ──────────────────────────
 async function generarPDFFactibilidad(params: {
   denominacion: string;
@@ -246,24 +283,24 @@ async function generarPDFFactibilidad(params: {
   if (!fs.existsSync(FACTIBILIDAD_DIR)) {
     fs.mkdirSync(FACTIBILIDAD_DIR, { recursive: true });
   }
-
+ 
   const pdfDoc = await PDFDocument.create();
   const fontR = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const fontB = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
+ 
   const W = 595.28, H = 841.89, M = 50;
   const CW = W - 2 * M;
-
+ 
   // Colores por dictamen
   const dictamenColor = {
     'VIABLE': rgb(0.1, 0.6, 0.1),
     'CONDICIONADA': rgb(0.9, 0.6, 0.0),
     'NO_VIABLE': rgb(0.8, 0.1, 0.1),
   }[params.dictamen] || rgb(0.5, 0.5, 0.5);
-
+ 
   let page = pdfDoc.addPage([W, H]);
   let y = H - M;
-
+ 
   const escribir = (texto: string, bold = false, size = 10, color = rgb(0.1, 0.1, 0.1), indent = 0) => {
     if (y < M + 30) {
       page = pdfDoc.addPage([W, H]);
@@ -283,20 +320,20 @@ async function generarPDFFactibilidad(params: {
     }
     if (linea) { page.drawText(linea, { x: M + indent, y, size, font, color }); y -= size + 4; }
   };
-
+ 
   const separador = () => {
     page.drawLine({ start: { x: M, y: y + 2 }, end: { x: W - M, y: y + 2 }, thickness: 0.5, color: rgb(0.8, 0.8, 0.8) });
     y -= 8;
   };
-
+ 
   // ENCABEZADO
   page.drawRectangle({ x: 0, y: H - 80, width: W, height: 80, color: rgb(0.15, 0.35, 0.65) });
-  page.drawText('MARCAS FÁCIL', { x: M, y: H - 35, size: 18, font: fontB, color: rgb(1, 1, 1) });
+  page.drawText('MARCA FÁCIL', { x: M, y: H - 35, size: 18, font: fontB, color: rgb(1, 1, 1) });
   page.drawText('ESTUDIO DE FACTIBILIDAD MARCARIA', { x: M, y: H - 55, size: 11, font: fontR, color: rgb(0.8, 0.9, 1) });
   page.drawText(`Agente PI Mat. N° 1974 — Honorio M. Leguizamón Pondal`, { x: M, y: H - 70, size: 8, font: fontR, color: rgb(0.6, 0.8, 1) });
-
+ 
   y = H - 95;
-
+ 
   // DATOS DEL ESTUDIO
   y -= 8;
   escribir('DATOS DEL ESTUDIO', true, 11, rgb(0.2, 0.2, 0.6));
@@ -306,24 +343,24 @@ async function generarPDFFactibilidad(params: {
   if (params.productos) escribir(`Productos/servicios: ${params.productos}`, false, 9, rgb(0.3, 0.3, 0.3));
   escribir(`Fecha del estudio: ${params.fecha.toLocaleDateString('es-AR')}`, false, 9, rgb(0.4, 0.4, 0.4));
   y -= 6;
-
+ 
   // DICTAMEN DESTACADO
   const boxH = 50;
   page.drawRectangle({ x: M, y: y - boxH, width: CW, height: boxH, color: rgb(0.95, 0.95, 0.95), borderColor: dictamenColor, borderWidth: 2 });
   page.drawText(`DICTAMEN: ${params.dictamen.replace('_', ' ')}`, { x: M + 10, y: y - 20, size: 14, font: fontB, color: dictamenColor });
   page.drawText(`Nivel de riesgo: ${params.riesgo}`, { x: M + 10, y: y - 38, size: 10, font: fontR, color: rgb(0.3, 0.3, 0.3) });
   y -= boxH + 12;
-
+ 
   // RESUMEN
   escribir('RESUMEN DEL DICTAMEN', true, 11, rgb(0.2, 0.2, 0.6));
   separador();
   escribir(params.resumenDictamen, false, 10);
   y -= 8;
-
+ 
   // ANTECEDENTES
   escribir('ANTECEDENTES ENCONTRADOS', true, 11, rgb(0.2, 0.2, 0.6));
   separador();
-
+ 
   if (params.antecedentes.length === 0) {
     escribir('No se encontraron antecedentes en la base de datos del sistema.', false, 10, rgb(0.4, 0.4, 0.4));
   } else {
@@ -339,20 +376,20 @@ async function generarPDFFactibilidad(params: {
       escribir(`... y ${params.antecedentes.length - 20} antecedentes más con similitud inferior.`, false, 8, rgb(0.5, 0.5, 0.5));
     }
   }
-
+ 
   y -= 8;
-
+ 
   // NOTA LEGAL
   escribir('NOTA LEGAL', true, 9, rgb(0.4, 0.4, 0.4));
   separador();
   escribir('Este estudio de factibilidad tiene carácter informativo y no constituye asesoramiento jurídico vinculante. La factibilidad final del registro marcario depende de la evaluación del INPI y de las oposiciones que pudieren formularse durante el período de publicación en el Boletín de Marcas. Se recomienda confirmar con el portal del INPI (www.inpi.gob.ar) la vigencia de los antecedentes detectados.', false, 8, rgb(0.5, 0.5, 0.5));
-
+ 
   const pdfBytes = await pdfDoc.save();
   const filename = `factibilidad-${params.denominacion.replace(/[^a-zA-Z0-9]/g, '_')}-clase${params.claseNiza}-${Date.now()}.pdf`;
   const filePath = path.join(FACTIBILIDAD_DIR, filename);
   fs.writeFileSync(filePath, pdfBytes);
-
+ 
   return filePath;
 }
-
+ 
 export default router;
