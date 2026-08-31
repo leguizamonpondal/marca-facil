@@ -219,72 +219,108 @@ export interface MarcaINPI {
 }
  
 /**
- * Busca en TMView (Trademark Vision) — incluye registro argentino del INPI.
- * API pública, sin autenticación, respuesta JSON.
- * Docs: https://www.tmdn.org/tmview/swagger-ui.html
+ * Busca marcas en el INPI Argentina mediante POST directo al formulario de búsqueda.
+ * No requiere Playwright ni autenticación.
+ *
+ * Estructura del formulario descubierta mediante inspección del portal:
+ *   POST https://portaltramites.inpi.gob.ar/MarcasConsultas/Grilla
+ *   Campos: tipob=1, Denominacion=<texto>, clase=<número>, TxtDenominacionTipoBusqueda=<modo>
+ *
+ * La respuesta es HTML con una tabla de resultados que parseamos con regex.
  */
-async function buscarEnTMView(denominacion: string, clase: number): Promise<MarcaINPI[]> {
+async function buscarPorPostINPI(denominacion: string, clase: number): Promise<MarcaINPI[]> {
   const { default: axios } = await import('axios');
+  const qs = await import('querystring');
  
-  try {
-    // TMView REST API — búsqueda por denominación en territorio Argentina (AR)
-    const url = 'https://www.tmdn.org/tmview/api/trademark/search';
-    const params = {
-      page: 1,
-      pageSize: 50,
-      territories: 'AR',            // Argentina = INPI
-      niceclasses: String(clase),
-      term: denominacion,
-      trademarkStatus: '',           // todas: registradas, en trámite, etc.
-      trademarkType: '',
-    };
+  const BASE = 'https://portaltramites.inpi.gob.ar';
+  const GRILLA_URL = `${BASE}/MarcasConsultas/Grilla`;
  
-    const { data } = await axios.get(url, {
-      params,
-      timeout: 15_000,
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'MarcaFacil/1.0 (trademark research tool)',
-        'Referer': 'https://www.tmdn.org/tmview/',
-      },
-    });
+  // Modos de búsqueda por denominación: 1=Contiene, 2=Empieza con, 3=Igual
+  const modos = ['1', '2'];
+  const marcas: MarcaINPI[] = [];
+  const actasVistas = new Set<string>();
  
-    const trademarks: any[] = data?.trademarks || data?.results || data?.items || [];
-    if (trademarks.length === 0) {
-      logger.info(`[TMView] Sin resultados para "${denominacion}" clase ${clase} en AR`);
-      return [];
+  for (const modo of modos) {
+    try {
+      const body = qs.stringify({
+        tipob: '1',                           // formulario "avanzada" (con denominación + clase)
+        Denominacion: denominacion,
+        TxtDenominacionTipoBusqueda: modo,    // 1=Contiene, 2=Empieza con
+        clase: String(clase),
+        vigentes: 'true',
+        BtnBuscarAvanzada: 'BUSCAR',
+      });
+ 
+      const { data } = await axios.post(GRILLA_URL, body, {
+        timeout: 20_000,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
+          'Origin': BASE,
+          'Accept': 'text/html,application/xhtml+xml,application/xml',
+          'Accept-Language': 'es-AR,es;q=0.9',
+        },
+      });
+ 
+      const html = String(data);
+ 
+      // Parsear filas de la tabla de resultados
+      // Estructura típica INPI: <tr> con celdas Acta | Denominación | Clase | Titular | Estado | Fechas
+      const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+ 
+      for (const fila of filas) {
+        const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
+ 
+        if (celdas.length < 2) continue;
+ 
+        // Detectar si la primera celda parece un número de acta
+        const posibleActa = celdas[0].replace(/\D/g, '');
+        if (posibleActa.length < 4) continue;
+ 
+        const acta = posibleActa;
+        if (actasVistas.has(acta)) continue;
+        actasVistas.add(acta);
+ 
+        const denom = celdas[1] || celdas[0];
+        if (!denom || denom.length < 2) continue;
+ 
+        marcas.push({
+          acta,
+          denominacion: denom,
+          claseNiza: parseInt(celdas[2]) || clase,
+          titular: celdas[3] || '',
+          estado: celdas[4] || celdas[5] || '',
+          fechaSolicitud: celdas[5] || undefined,
+          fechaPublicacion: celdas[6] || undefined,
+        });
+      }
+ 
+      // Si encontró resultados con "Contiene", no hace falta "Empieza con"
+      if (marcas.length > 0) break;
+ 
+    } catch (err: any) {
+      logger.warn(`[INPI POST] Error modo ${modo}: ${err.message}`);
     }
- 
-    logger.info(`[TMView] ${trademarks.length} marcas encontradas para "${denominacion}" clase ${clase} en AR`);
- 
-    return trademarks.map((tm: any) => ({
-      acta: tm.applicationNumber || tm.registrationNumber || tm.st13 || '',
-      denominacion: tm.trademarkName || tm.wordElements || tm.name || '',
-      claseNiza: clase,
-      titular: (tm.holders?.[0]?.name || tm.applicant || tm.owner || '').trim(),
-      estado: tm.trademarkStatus || tm.status || '',
-      fechaSolicitud: tm.applicationDate || undefined,
-      fechaPublicacion: tm.publicationDate || undefined,
-    })).filter(m => m.denominacion.length > 0);
- 
-  } catch (err: any) {
-    logger.warn(`[TMView] Error consultando API: ${err.message}`);
-    return [];
   }
+ 
+  logger.info(`[INPI POST] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
+  return marcas;
 }
  
 export async function buscarMarcasPublicoINPI(
   denominacion: string,
   clase: number,
 ): Promise<MarcaINPI[]> {
-  // 1. Intentar TMView (fuente principal — incluye INPI Argentina, sin scraping)
-  const resultadosTMView = await buscarEnTMView(denominacion, clase);
-  if (resultadosTMView.length > 0) {
-    return resultadosTMView;
+  // 1. POST directo al formulario del INPI (fuente principal — rápida, sin browser)
+  const resultadosPost = await buscarPorPostINPI(denominacion, clase);
+  if (resultadosPost.length > 0) {
+    return resultadosPost;
   }
  
-  // 2. Fallback: Playwright sobre portal público INPI
-  logger.info(`[INPI] TMView sin resultados — usando Playwright para "${denominacion}" clase ${clase}`);
+  // 2. Fallback: Playwright (requiere Chromium instalado en el contenedor)
+  logger.info(`[INPI] POST directo sin resultados — usando Playwright para "${denominacion}" clase ${clase}`);
   return buscarMarcasPlaywright(denominacion, clase);
 }
  
@@ -641,4 +677,3 @@ export async function presentarSolicitud(
     await browser.close();
   }
 }
- 
