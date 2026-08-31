@@ -350,122 +350,81 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number): Prom
   const marcas: MarcaINPI[] = [];
  
   try {
-    logger.info(`[INPI] Navegando a buscador público: ${INPI_BUSQUEDA_URL}`);
-    await page.goto(INPI_BUSQUEDA_URL, { waitUntil: 'networkidle', timeout: 30_000 });
+    logger.info(`[INPI Playwright] Navegando a: ${INPI_BUSQUEDA_URL}`);
+    await page.goto(INPI_BUSQUEDA_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
  
-    // ── Completar campo de denominación ──────────────────────────────────────
-    // El buscador INPI tiene un input de denominación (texto libre)
-    const inputDenom = page.locator([
-      'input[name*="denominacion" i]',
-      'input[id*="denominacion" i]',
-      'input[placeholder*="ominaci" i]',
-      'input[placeholder*="arca" i]',
-      'input[name*="nombre" i]',
-      'input[id*="nombre" i]',
-      'input[type="text"]:visible',
-    ].join(', ')).first();
+    // Esperar que el formulario esté visible
+    await page.waitForSelector('#Denominacion', { timeout: 15_000 });
  
-    if (await inputDenom.count() > 0) {
-      await inputDenom.fill(denominacion);
-    } else {
-      logger.warn('[INPI] No se encontró campo de denominación en el buscador');
-    }
+    // Completar denominación (selector exacto descubierto via inspección)
+    await page.fill('#Denominacion', denominacion);
  
-    // ── Seleccionar clase NIZA ────────────────────────────────────────────────
-    const selectClase = page.locator([
-      'select[name*="clase" i]',
-      'select[id*="clase" i]',
-      'select[name*="niza" i]',
-    ].join(', ')).first();
+    // Seleccionar clase NIZA
+    await page.selectOption('#clase', { value: String(clase) }).catch(async () => {
+      await page.selectOption('[name="clase"]', String(clase)).catch(() => {});
+    });
  
-    if (await selectClase.count() > 0) {
-      // Intentar seleccionar por value numérico, label o texto visible
-      await selectClase.selectOption({ value: String(clase) }).catch(async () => {
-        await selectClase.selectOption({ label: `Clase ${clase}` }).catch(() => {});
-      });
-    }
+    // Interceptar respuestas AJAX antes de hacer click
+    const responsePromise = page.waitForResponse(
+      r => r.url().includes('Grilla') || r.url().includes('grilla'),
+      { timeout: 20_000 }
+    ).catch(() => null);
  
-    // ── Enviar búsqueda ───────────────────────────────────────────────────────
-    const btnBuscar = page.locator([
-      'button[type="submit"]:visible',
-      'input[type="submit"]:visible',
-      'button:has-text("Buscar"):visible',
-      'button:has-text("Consultar"):visible',
-      'input[value*="Buscar" i]:visible',
-    ].join(', ')).first();
+    // Click en el botón buscar (selector exacto)
+    await page.click('[name="BtnBuscarAvanzada"]');
  
-    if (await btnBuscar.count() > 0) {
-      await btnBuscar.click();
-    } else {
-      await page.keyboard.press('Enter');
-    }
- 
-    await page.waitForLoadState('networkidle', { timeout: 25_000 }).catch(() => {});
- 
-    // ── Interceptar posible llamada AJAX de resultados ────────────────────────
-    // El portal INPI puede devolver JSON vía XHR; intentar capturarlo si está en el DOM
-    const pageContent = await page.content();
-    const jsonMatch = pageContent.match(/"marcas"\s*:\s*(\[[\s\S]*?\])/);
-    if (jsonMatch) {
+    // Esperar respuesta AJAX o navegación
+    const ajaxResponse = await responsePromise;
+    if (ajaxResponse) {
       try {
-        const lista = JSON.parse(jsonMatch[1]);
-        for (const item of lista.slice(0, 100)) {
-          marcas.push({
-            acta: String(item.acta || item.nroActa || ''),
-            denominacion: item.denominacion || item.nombre || '',
-            claseNiza: parseInt(item.clase || item.claseNiza) || clase,
-            titular: item.titular || item.solicitante || '',
-            estado: item.estado || '',
-          });
+        const json = await ajaxResponse.json().catch(() => null);
+        if (json) {
+          const lista: any[] = Array.isArray(json) ? json : (json.data || json.marcas || json.items || []);
+          for (const item of lista.slice(0, 100)) {
+            const acta = String(item.Acta || item.acta || item.NroActa || '');
+            const denom = item.Denominacion || item.denominacion || item.Nombre || '';
+            if (!denom) continue;
+            marcas.push({
+              acta,
+              denominacion: denom,
+              claseNiza: parseInt(item.Clase || item.clase || clase) || clase,
+              titular: item.Titular || item.titular || '',
+              estado: item.Estado || item.estado || '',
+              fechaSolicitud: item.FechaIngreso || item.fechaSolicitud || undefined,
+            });
+          }
+          logger.info(`[INPI Playwright] ${marcas.length} marcas vía AJAX JSON`);
+          return marcas;
         }
-        logger.info(`[INPI] Extraídas ${marcas.length} marcas vía JSON embebido`);
-        return marcas;
       } catch (_) {}
     }
  
-    // ── Extraer tabla de resultados ───────────────────────────────────────────
-    const filas = await page.locator('table tbody tr').all();
+    // Esperar que la tabla de resultados aparezca
+    await page.waitForSelector('table tbody tr, .grilla tr, #tblResultados tr', { timeout: 15_000 }).catch(() => {});
+ 
+    // Extraer tabla
+    const filas = await page.locator('table tbody tr, .grilla tr, #tblResultados tr').all();
     for (const fila of filas.slice(0, 100)) {
       const celdas = await fila.locator('td').all();
-      if (celdas.length >= 2) {
-        const textos = await Promise.all(celdas.map(c => c.innerText().catch(() => '')));
-        // El formato típico del buscador INPI es: Acta | Denominación | Clase | Titular | Estado
-        const acta = textos[0]?.trim();
-        const denom = textos[1]?.trim() || textos[0]?.trim();
-        if (denom && denom.length > 1) {
-          marcas.push({
-            acta: acta || '',
-            denominacion: celdas.length >= 3 ? (textos[1]?.trim() || '') : denom,
-            claseNiza: parseInt(textos[2]) || clase,
-            titular: textos[3]?.trim() || '',
-            estado: textos[4]?.trim() || textos[5]?.trim() || '',
-          });
-        }
-      }
+      if (celdas.length < 2) continue;
+      const textos = await Promise.all(celdas.map(c => c.innerText().catch(() => '')));
+      const posibleActa = textos[0]?.replace(/\D/g, '');
+      if (!posibleActa || posibleActa.length < 4) continue;
+      const denom = textos[1]?.trim();
+      if (!denom || denom.length < 2) continue;
+      marcas.push({
+        acta: posibleActa,
+        denominacion: denom,
+        claseNiza: parseInt(textos[2]) || clase,
+        titular: textos[3]?.trim() || '',
+        estado: textos[4]?.trim() || '',
+        fechaSolicitud: textos[5]?.trim() || undefined,
+      });
     }
  
-    // ── Alternativa: cards / items tipo lista ─────────────────────────────────
-    if (marcas.length === 0) {
-      const items = await page.locator('.resultado, .marca-item, [class*="result"], [class*="marca"]').all();
-      for (const item of items.slice(0, 100)) {
-        const texto = await item.innerText().catch(() => '');
-        const actaMatch = texto.match(/(?:Acta|N[°º]|Exp\.?)\s*:?\s*(\d{5,})/i);
-        const lines = texto.split('\n').map(l => l.trim()).filter(Boolean);
-        if (lines.length > 0) {
-          marcas.push({
-            acta: actaMatch?.[1] || '',
-            denominacion: lines[0],
-            claseNiza: clase,
-            titular: lines[2] || '',
-            estado: lines[lines.length - 1] || '',
-          });
-        }
-      }
-    }
- 
-    logger.info(`[INPI] Playwright encontró ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
+    logger.info(`[INPI Playwright] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
   } catch (err: any) {
-    logger.warn(`[INPI] Playwright scraping falló para "${denominacion}" clase ${clase}: ${err.message}`);
+    logger.warn(`[INPI Playwright] Error: ${err.message}`);
   } finally {
     await browser.close();
   }
