@@ -55,19 +55,28 @@ router.get('/test', async (req: any, res: Response) => {
     resultado.fuentes.inpiPortal = { error: err.message, code: err.code, httpStatus: err.response?.status };
   }
  
-  // Probar POST directo al formulario INPI
+  // Probar POST con sesión (GET primero para cookies + CSRF, luego POST)
   try {
     const { default: axios } = await import('axios');
     const qs = await import('querystring');
-    const body = qs.stringify({ tipob: '1', Denominacion: denominacion, TxtDenominacionTipoBusqueda: '1', clase: String(clase), vigentes: 'true', BtnBuscarAvanzada: 'BUSCAR' });
-    const { data, status } = await axios.post('https://portaltramites.inpi.gob.ar/MarcasConsultas/Grilla', body, {
-      timeout: 20_000,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', 'Referer': INPI_URL, 'Origin': 'https://portaltramites.inpi.gob.ar' },
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+    // GET para sesión
+    const { data: htmlGet, headers: respH } = await axios.get(INPI_URL, { timeout: 15_000, headers: { 'User-Agent': UA } });
+    const setCookie = respH['set-cookie'] || [];
+    const cookies = Array.isArray(setCookie) ? setCookie.map((c: string) => c.split(';')[0]).join('; ') : '';
+    const csrfMatch = String(htmlGet).match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i);
+    const csrf = csrfMatch ? csrfMatch[1] : '';
+    // POST con cookies
+    const formData: Record<string,string> = { tipob: '1', Denominacion: denominacion, TxtDenominacionTipoBusqueda: '1', clase: String(clase), vigentes: 'true', BtnBuscarAvanzada: 'BUSCAR' };
+    if (csrf) formData['__RequestVerificationToken'] = csrf;
+    const { data, status } = await axios.post('https://portaltramites.inpi.gob.ar/MarcasConsultas/Grilla', qs.stringify(formData), {
+      timeout: 25_000,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA, 'Referer': INPI_URL, 'Origin': 'https://portaltramites.inpi.gob.ar', ...(cookies ? { Cookie: cookies } : {}) },
+      maxRedirects: 5,
     });
     const html = String(data);
     const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].length;
-    const snippet = html.slice(0, 1000);
-    resultado.fuentes.inpiPost = { status, bodyLength: html.length, filas, snippet };
+    resultado.fuentes.inpiPost = { status, bodyLength: html.length, filas, cookies: cookies.slice(0,80), csrf: csrf ? 'SI' : 'NO', snippet: html.slice(0, 800) };
   } catch (err: any) {
     resultado.fuentes.inpiPost = { error: err.message, httpStatus: err.response?.status };
   }
