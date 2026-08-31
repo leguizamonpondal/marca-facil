@@ -1,5 +1,5 @@
 /**
- * Estudio de Factibilidad — MARCAS FÁCIL
+ * Estudio de Factibilidad — MARCA FÁCIL
  * Búsqueda de antecedentes y diagnóstico de viabilidad
  */
 import { useState } from 'react';
@@ -93,9 +93,9 @@ export default function Factibilidad() {
 
         <div className="bg-gray-50 rounded-xl p-3 text-xs text-gray-500 space-y-1">
           <p className="font-medium text-gray-700">Metodología de análisis</p>
-          <p>· Búsqueda en el Boletín de Marcas del INPI (base actualizada semanalmente)</p>
-          <p>· Algoritmo de confundibilidad: similitud fonética + visual (Levenshtein + trigramas)</p>
-          <p>· Análisis de clases relacionadas según jurisprudencia INPI</p>
+          <p>· Búsqueda en el registro público del INPI (TMView + Boletín de Marcas)</p>
+          <p>· Análisis de confundibilidad en tres ejes: gráfico, fonético e ideológico (Art. 3° b) Ley 22.362)</p>
+          <p>· Análisis de clases relacionadas según jurisprudencia INPI/CNCAF</p>
           <p>· El estudio es orientativo — no reemplaza el análisis profesional personalizado</p>
         </div>
 
