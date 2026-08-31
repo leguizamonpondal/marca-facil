@@ -50,89 +50,62 @@ router.get('/test', async (req: any, res: Response) => {
     resultado.fuentes.httpGet = { error: err.message, code: err.code };
   }
  
-  // 2. Test Playwright (approach principal — AJAX requiere navegador real)
+  // 2. Test Playwright con diagnóstico completo
   try {
     const { chromium } = await import('playwright');
     const t0 = Date.now();
-    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    const page = await browser.newPage();
-    const marcasCapturadas: any[] = [];
-    const ajaxRequests: string[] = [];
- 
-    // Interceptar todas las peticiones AJAX para debug
-    page.on('request', req => {
-      if (req.url().includes('Grilla') || req.url().includes('grilla') || req.url().includes('busqueda')) {
-        ajaxRequests.push(`${req.method()} ${req.url()}`);
-      }
+    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      locale: 'es-AR',
     });
+    const page = await context.newPage();
+    await page.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => false }); });
  
-    let ajaxResponse: any = null;
-    page.on('response', async resp => {
-      const url = resp.url();
-      if ((url.includes('Grilla') || url.includes('grilla')) && resp.status() === 200) {
-        try {
-          const ct = resp.headers()['content-type'] || '';
-          if (ct.includes('json')) {
-            ajaxResponse = await resp.json().catch(() => null);
-          } else {
-            const text = await resp.text().catch(() => '');
-            if (text.includes('<tr') && text.includes('<td')) {
-              ajaxResponse = { html: text.slice(0, 2000), type: 'html-table' };
-            }
-          }
-        } catch (_) {}
-      }
-    });
+    const allRequests: string[] = [];
+    page.on('request', r => allRequests.push(`${r.method()} ${r.url()}`));
  
-    await page.goto(INPI_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    // Esperar networkidle para que el JS termine de cargar
+    await page.goto(INPI_URL, { waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {});
+    await page.waitForTimeout(2000);
  
-    // Verificar que el formulario esté
-    const tengoForm = await page.$('#Denominacion').then(el => !!el).catch(() => false);
-    resultado.fuentes.playwright = { formEncontrado: tengoForm };
+    // Screenshot en base64 para ver qué cargó
+    const screenshot = (await page.screenshot({ type: 'jpeg', quality: 60 })).toString('base64');
  
-    if (tengoForm) {
-      await page.fill('#Denominacion', denominacion);
-      await page.selectOption('#clase', { value: String(clase) }).catch(async () => {
-        // Intentar por texto visible
-        const opts = await page.$$eval('#clase option', (els: any[]) => els.map((e: any) => ({ v: e.value, t: e.text })));
-        resultado.fuentes.playwright.opcionesClase = opts;
-      });
-      await page.click('[name="BtnBuscarAvanzada"]');
-      await page.waitForTimeout(4000); // Esperar AJAX
+    // Listar TODOS los inputs y selects que existen en la página (incluyendo iframes)
+    const todosInputs = await page.$$eval('input, select, textarea, button', (els: any[]) =>
+      els.map((el: any) => ({ tag: el.tagName, id: el.id, name: el.name, type: el.type, value: el.value, visible: el.offsetParent !== null }))
+    ).catch(() => []);
  
-      // Extraer tabla de resultados
-      const filas = await page.$$eval('table tbody tr, .grilla tr', (rows: any[]) =>
-        rows.slice(0, 20).map((r: any) => {
-          const celdas = Array.from(r.querySelectorAll('td')).map((td: any) => td.innerText?.trim() || '');
-          return celdas.filter(Boolean);
-        }).filter((r: any) => r.length >= 2)
-      ).catch(() => []);
+    // Detectar iframes
+    const iframes = await page.$$eval('iframe', (frames: any[]) =>
+      frames.map((f: any) => ({ src: f.src, id: f.id, name: f.name }))
+    ).catch(() => []);
  
-      // Capturar texto visible de resultados
-      const htmlResultados = await page.$eval('#tblResultados, .resultados, table', (el: any) => el.innerHTML?.slice(0, 3000) || '').catch(() => '');
+    // URL final después de carga (puede haber redirect)
+    const urlFinal = page.url();
+    const titulo = await page.title().catch(() => '');
  
-      resultado.fuentes.playwright = {
-        ...resultado.fuentes.playwright,
-        ms: Date.now()-t0,
-        ajaxRequests,
-        ajaxResponse: ajaxResponse ? JSON.stringify(ajaxResponse).slice(0, 1000) : null,
-        filasTabla: filas.length,
-        primerasFilas: filas.slice(0, 5),
-        htmlResultados: htmlResultados.slice(0, 1500),
-      };
- 
-      // Si hay AJAX de tipo JSON, parsear como marcas
-      if (ajaxResponse && !ajaxResponse.html) {
-        const lista = Array.isArray(ajaxResponse) ? ajaxResponse : (ajaxResponse.data || ajaxResponse.marcas || []);
-        marcasCapturadas.push(...lista.slice(0, 10));
-      }
+    // Intentar selectors alternativos
+    const intentos: Record<string, boolean> = {};
+    for (const sel of ['#Denominacion', '[name="Denominacion"]', 'input[type="text"]', 'form', '#busqueda', '.busqueda']) {
+      intentos[sel] = await page.$(sel).then(el => !!el).catch(() => false);
     }
  
-    resultado.fuentes.playwright.marcasCapturadas = marcasCapturadas;
-    await browser.close();
+    resultado.fuentes.playwright = {
+      ms: Date.now() - t0,
+      urlFinal,
+      titulo,
+      todosInputs: todosInputs.slice(0, 20),
+      iframes,
+      intentos,
+      allRequests: allRequests.slice(0, 30),
+      screenshot: `data:image/jpeg;base64,${screenshot.slice(0, 5000)}`, // primeros 5KB del screenshot
+    };
  
+    await browser.close();
   } catch (err: any) {
-    resultado.fuentes.playwright = { error: err.message, stack: err.stack?.slice(0, 300) };
+    resultado.fuentes.playwright = { error: err.message, stack: err.stack?.slice(0, 500) };
   }
  
   // 3. Prueba del servicio completo (buscarMarcasPublicoINPI)
