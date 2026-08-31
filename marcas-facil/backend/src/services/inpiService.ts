@@ -233,76 +233,94 @@ async function buscarPorPostINPI(denominacion: string, clase: number): Promise<M
   const qs = await import('querystring');
  
   const BASE = 'https://portaltramites.inpi.gob.ar';
+  const BUSQUEDA_URL = `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`;
   const GRILLA_URL = `${BASE}/MarcasConsultas/Grilla`;
  
-  // Modos de búsqueda por denominación: 1=Contiene, 2=Empieza con, 3=Igual
-  const modos = ['1', '2'];
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+ 
+  // Paso 1: GET al portal para obtener cookies de sesión y token CSRF (ASP.NET)
+  let cookies = '';
+  let csrfToken = '';
+  try {
+    const { data: htmlGet, headers: respHeaders } = await axios.get(BUSQUEDA_URL, {
+      timeout: 15_000,
+      headers: { 'User-Agent': UA, Accept: 'text/html', 'Accept-Language': 'es-AR,es;q=0.9' },
+    });
+    // Extraer cookie de sesión
+    const setCookie = respHeaders['set-cookie'] || [];
+    cookies = Array.isArray(setCookie)
+      ? setCookie.map((c: string) => c.split(';')[0]).join('; ')
+      : String(setCookie).split(';')[0];
+ 
+    // Extraer token CSRF de ASP.NET si existe
+    const csrfMatch = String(htmlGet).match(
+      /name="__RequestVerificationToken"[^>]*value="([^"]+)"/i
+    ) || String(htmlGet).match(/name="_token"[^>]*value="([^"]+)"/i);
+    if (csrfMatch) csrfToken = csrfMatch[1];
+ 
+    logger.info(`[INPI POST] Sesión establecida. Cookies: ${cookies.slice(0, 60)}... CSRF: ${csrfToken ? 'OK' : 'no encontrado'}`);
+  } catch (err: any) {
+    logger.warn(`[INPI POST] Error obteniendo sesión: ${err.message}`);
+  }
+ 
   const marcas: MarcaINPI[] = [];
   const actasVistas = new Set<string>();
  
-  for (const modo of modos) {
-    try {
-      const body = qs.stringify({
-        tipob: '1',                           // formulario "avanzada" (con denominación + clase)
-        Denominacion: denominacion,
-        TxtDenominacionTipoBusqueda: modo,    // 1=Contiene, 2=Empieza con
-        clase: String(clase),
-        vigentes: 'true',
-        BtnBuscarAvanzada: 'BUSCAR',
+  // Paso 2: POST al endpoint de búsqueda con cookies + CSRF
+  try {
+    const formData: Record<string, string> = {
+      tipob: '1',
+      Denominacion: denominacion,
+      TxtDenominacionTipoBusqueda: '1',   // 1 = Contiene
+      clase: String(clase),
+      vigentes: 'true',
+      BtnBuscarAvanzada: 'BUSCAR',
+    };
+    if (csrfToken) formData['__RequestVerificationToken'] = csrfToken;
+ 
+    const { data: htmlPost } = await axios.post(GRILLA_URL, qs.stringify(formData), {
+      timeout: 25_000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': UA,
+        'Referer': BUSQUEDA_URL,
+        'Origin': BASE,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'es-AR,es;q=0.9',
+        ...(cookies ? { Cookie: cookies } : {}),
+      },
+      maxRedirects: 5,
+    });
+ 
+    const html = String(htmlPost);
+    logger.info(`[INPI POST] Respuesta recibida: ${html.length} bytes`);
+ 
+    // Parsear tabla de resultados
+    // Estructura INPI: <tr> → celdas: Acta | Denominación | Clase | Titular | Estado
+    const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+    for (const fila of filas) {
+      const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+        .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
+      if (celdas.length < 2) continue;
+      const posibleActa = celdas[0].replace(/\D/g, '');
+      if (posibleActa.length < 4) continue;
+      if (actasVistas.has(posibleActa)) continue;
+      actasVistas.add(posibleActa);
+      const denom = celdas[1] || '';
+      if (!denom || denom.length < 2) continue;
+      marcas.push({
+        acta: posibleActa,
+        denominacion: denom,
+        claseNiza: parseInt(celdas[2]) || clase,
+        titular: celdas[3] || '',
+        estado: celdas[4] || '',
+        fechaSolicitud: celdas[5] || undefined,
+        fechaPublicacion: celdas[6] || undefined,
       });
- 
-      const { data } = await axios.post(GRILLA_URL, body, {
-        timeout: 20_000,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Referer': `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
-          'Origin': BASE,
-          'Accept': 'text/html,application/xhtml+xml,application/xml',
-          'Accept-Language': 'es-AR,es;q=0.9',
-        },
-      });
- 
-      const html = String(data);
- 
-      // Parsear filas de la tabla de resultados
-      // Estructura típica INPI: <tr> con celdas Acta | Denominación | Clase | Titular | Estado | Fechas
-      const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
- 
-      for (const fila of filas) {
-        const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-          .map(c => c[1].replace(/<[^>]+>/g, '').trim());
- 
-        if (celdas.length < 2) continue;
- 
-        // Detectar si la primera celda parece un número de acta
-        const posibleActa = celdas[0].replace(/\D/g, '');
-        if (posibleActa.length < 4) continue;
- 
-        const acta = posibleActa;
-        if (actasVistas.has(acta)) continue;
-        actasVistas.add(acta);
- 
-        const denom = celdas[1] || celdas[0];
-        if (!denom || denom.length < 2) continue;
- 
-        marcas.push({
-          acta,
-          denominacion: denom,
-          claseNiza: parseInt(celdas[2]) || clase,
-          titular: celdas[3] || '',
-          estado: celdas[4] || celdas[5] || '',
-          fechaSolicitud: celdas[5] || undefined,
-          fechaPublicacion: celdas[6] || undefined,
-        });
-      }
- 
-      // Si encontró resultados con "Contiene", no hace falta "Empieza con"
-      if (marcas.length > 0) break;
- 
-    } catch (err: any) {
-      logger.warn(`[INPI POST] Error modo ${modo}: ${err.message}`);
     }
+ 
+  } catch (err: any) {
+    logger.warn(`[INPI POST] Error en búsqueda: ${err.message}`);
   }
  
   logger.info(`[INPI POST] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
