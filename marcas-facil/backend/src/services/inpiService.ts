@@ -18,7 +18,7 @@ const ARCA_AUTH_URL =
   'https://auth.afip.gob.ar/contribuyente_/login.xhtml';
 const INPI_PORTAL_URL =
   process.env.INPI_PORTAL_URL ||
-  'https://portaltramitesline.inpi.gob.ar/';
+  'https://portaltramites.inpi.gob.ar'
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 export interface CredencialesARCA {
@@ -204,7 +204,7 @@ export async function consultarEstadoActaPublico(acta: string): Promise<EstadoAc
   const { default: axios } = await import('axios');
   const baseUrls = [
     `https://www.inpi.gob.ar/rest/consulta/marcas/${acta}`,
-    `https://portaltramitesline.inpi.gob.ar/api/consulta/${acta}`,
+    `https://portaltramites.inpi.gob.ar/api/consulta/${acta}`,
   ];
 
   for (const url of baseUrls) {
