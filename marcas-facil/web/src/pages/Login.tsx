@@ -1,5 +1,5 @@
 /**
- * Página de Login y Registro — MARCAS FÁCIL
+ * Página de Login y Registro — MARCA FACIL
  */
 import { useState } from 'react';
 import { useNavigate, Navigate } from 'react-router-dom';
@@ -64,7 +64,7 @@ export default function Login() {
           <div className="inline-flex items-center justify-center w-14 h-14 bg-primary-600 rounded-2xl mb-3 shadow-lg">
             <Scale className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">MARCAS FÁCIL</h1>
+          <h1 className="text-2xl font-bold text-gray-900">MARCA FACIL</h1>
           <p className="text-sm text-gray-500 mt-1">
             Gestión integral de marcas para PyMEs argentinas
           </p>
