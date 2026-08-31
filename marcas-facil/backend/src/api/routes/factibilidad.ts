@@ -29,56 +29,119 @@ const router = Router();
  
 const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
  
-// ── GET /api/factibilidad/test — Diagnóstico de búsqueda INPI (SIN auth) ──────
+// ── GET /api/factibilidad/test — Diagnóstico Playwright INPI (SIN auth) ────────
 router.get('/test', async (req: any, res: Response) => {
   const denominacion = String(req.query.denominacion || 'ADIDAS');
   const clase = parseInt(String(req.query.clase || '25'));
-  const resultado: Record<string, any> = { denominacion, clase, fuentes: {} };
+  const resultado: Record<string, any> = { denominacion, clase, timestamp: new Date().toISOString(), fuentes: {} };
  
   const INPI_URL = 'https://portaltramites.inpi.gob.ar/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA';
  
-  // Probar acceso HTTP al portal INPI y capturar estructura del formulario
+  // 1. Test acceso HTTP básico al portal
   try {
     const { default: axios } = await import('axios');
-    const { data, status } = await axios.get(INPI_URL, {
-      timeout: 15_000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-    });
+    const t0 = Date.now();
+    const { status, data } = await axios.get(INPI_URL, { timeout: 10_000, headers: { 'User-Agent': 'Mozilla/5.0' } });
     const html = String(data);
-    // Extraer inputs y selects para ver la estructura del formulario
-    const inputs = [...html.matchAll(/<input[^>]*>/gi)].map(m => m[0]).slice(0, 20);
-    const selects = [...html.matchAll(/<select[^>]*>/gi)].map(m => m[0]).slice(0, 10);
-    const forms = [...html.matchAll(/<form[^>]*>/gi)].map(m => m[0]).slice(0, 5);
-    const title = (html.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
-    resultado.fuentes.inpiPortal = { status, bodyLength: html.length, title, forms, inputs, selects, htmlSnippet: html.slice(0, 500) };
+    const hasDenomInput = html.includes('id="Denominacion"') || html.includes('name="Denominacion"');
+    const hasClaseSelect = html.includes('id="clase"') || html.includes('name="clase"');
+    resultado.fuentes.httpGet = { status, ms: Date.now()-t0, bodyLength: html.length, hasDenomInput, hasClaseSelect };
   } catch (err: any) {
-    resultado.fuentes.inpiPortal = { error: err.message, code: err.code, httpStatus: err.response?.status };
+    resultado.fuentes.httpGet = { error: err.message, code: err.code };
   }
  
-  // Probar POST con sesión (GET primero para cookies + CSRF, luego POST)
+  // 2. Test Playwright (approach principal — AJAX requiere navegador real)
   try {
-    const { default: axios } = await import('axios');
-    const qs = await import('querystring');
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-    // GET para sesión
-    const { data: htmlGet, headers: respH } = await axios.get(INPI_URL, { timeout: 15_000, headers: { 'User-Agent': UA } });
-    const setCookie = respH['set-cookie'] || [];
-    const cookies = Array.isArray(setCookie) ? setCookie.map((c: string) => c.split(';')[0]).join('; ') : '';
-    const csrfMatch = String(htmlGet).match(/name="__RequestVerificationToken"[^>]*value="([^"]+)"/i);
-    const csrf = csrfMatch ? csrfMatch[1] : '';
-    // POST con cookies
-    const formData: Record<string,string> = { tipob: '1', Denominacion: denominacion, TxtDenominacionTipoBusqueda: '1', clase: String(clase), vigentes: 'true', BtnBuscarAvanzada: 'BUSCAR' };
-    if (csrf) formData['__RequestVerificationToken'] = csrf;
-    const { data, status } = await axios.post('https://portaltramites.inpi.gob.ar/MarcasConsultas/Grilla', qs.stringify(formData), {
-      timeout: 25_000,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA, 'Referer': INPI_URL, 'Origin': 'https://portaltramites.inpi.gob.ar', ...(cookies ? { Cookie: cookies } : {}) },
-      maxRedirects: 5,
+    const { chromium } = await import('playwright');
+    const t0 = Date.now();
+    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const page = await browser.newPage();
+    const marcasCapturadas: any[] = [];
+    const ajaxRequests: string[] = [];
+ 
+    // Interceptar todas las peticiones AJAX para debug
+    page.on('request', req => {
+      if (req.url().includes('Grilla') || req.url().includes('grilla') || req.url().includes('busqueda')) {
+        ajaxRequests.push(`${req.method()} ${req.url()}`);
+      }
     });
-    const html = String(data);
-    const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].length;
-    resultado.fuentes.inpiPost = { status, bodyLength: html.length, filas, cookies: cookies.slice(0,80), csrf: csrf ? 'SI' : 'NO', snippet: html.slice(0, 800) };
+ 
+    let ajaxResponse: any = null;
+    page.on('response', async resp => {
+      const url = resp.url();
+      if ((url.includes('Grilla') || url.includes('grilla')) && resp.status() === 200) {
+        try {
+          const ct = resp.headers()['content-type'] || '';
+          if (ct.includes('json')) {
+            ajaxResponse = await resp.json().catch(() => null);
+          } else {
+            const text = await resp.text().catch(() => '');
+            if (text.includes('<tr') && text.includes('<td')) {
+              ajaxResponse = { html: text.slice(0, 2000), type: 'html-table' };
+            }
+          }
+        } catch (_) {}
+      }
+    });
+ 
+    await page.goto(INPI_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+ 
+    // Verificar que el formulario esté
+    const tengoForm = await page.$('#Denominacion').then(el => !!el).catch(() => false);
+    resultado.fuentes.playwright = { formEncontrado: tengoForm };
+ 
+    if (tengoForm) {
+      await page.fill('#Denominacion', denominacion);
+      await page.selectOption('#clase', { value: String(clase) }).catch(async () => {
+        // Intentar por texto visible
+        const opts = await page.$$eval('#clase option', (els: any[]) => els.map((e: any) => ({ v: e.value, t: e.text })));
+        resultado.fuentes.playwright.opcionesClase = opts;
+      });
+      await page.click('[name="BtnBuscarAvanzada"]');
+      await page.waitForTimeout(4000); // Esperar AJAX
+ 
+      // Extraer tabla de resultados
+      const filas = await page.$$eval('table tbody tr, .grilla tr', (rows: any[]) =>
+        rows.slice(0, 20).map((r: any) => {
+          const celdas = Array.from(r.querySelectorAll('td')).map((td: any) => td.innerText?.trim() || '');
+          return celdas.filter(Boolean);
+        }).filter((r: any) => r.length >= 2)
+      ).catch(() => []);
+ 
+      // Capturar texto visible de resultados
+      const htmlResultados = await page.$eval('#tblResultados, .resultados, table', (el: any) => el.innerHTML?.slice(0, 3000) || '').catch(() => '');
+ 
+      resultado.fuentes.playwright = {
+        ...resultado.fuentes.playwright,
+        ms: Date.now()-t0,
+        ajaxRequests,
+        ajaxResponse: ajaxResponse ? JSON.stringify(ajaxResponse).slice(0, 1000) : null,
+        filasTabla: filas.length,
+        primerasFilas: filas.slice(0, 5),
+        htmlResultados: htmlResultados.slice(0, 1500),
+      };
+ 
+      // Si hay AJAX de tipo JSON, parsear como marcas
+      if (ajaxResponse && !ajaxResponse.html) {
+        const lista = Array.isArray(ajaxResponse) ? ajaxResponse : (ajaxResponse.data || ajaxResponse.marcas || []);
+        marcasCapturadas.push(...lista.slice(0, 10));
+      }
+    }
+ 
+    resultado.fuentes.playwright.marcasCapturadas = marcasCapturadas;
+    await browser.close();
+ 
   } catch (err: any) {
-    resultado.fuentes.inpiPost = { error: err.message, httpStatus: err.response?.status };
+    resultado.fuentes.playwright = { error: err.message, stack: err.stack?.slice(0, 300) };
+  }
+ 
+  // 3. Prueba del servicio completo (buscarMarcasPublicoINPI)
+  try {
+    const t0 = Date.now();
+    const marcas = await buscarMarcasPublicoINPI(denominacion, clase);
+    resultado.fuentes.servicioCompleto = { marcas: marcas.slice(0, 10), total: marcas.length, ms: Date.now()-t0 };
+  } catch (err: any) {
+    resultado.fuentes.servicioCompleto = { error: err.message };
   }
  
   res.json(resultado);
