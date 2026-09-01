@@ -374,7 +374,10 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number): Prom
  
         const resp = await fetch('/MarcasConsultas/Grilla', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
           body: body.toString(),
           credentials: 'include',
         });
