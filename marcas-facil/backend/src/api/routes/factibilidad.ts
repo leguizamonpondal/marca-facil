@@ -86,10 +86,26 @@ router.get('/test', async (req: any, res: Response) => {
     const urlFinal = page.url();
     const titulo = await page.title().catch(() => '');
  
-    // Intentar selectors alternativos
-    const intentos: Record<string, boolean> = {};
-    for (const sel of ['#Denominacion', '[name="Denominacion"]', 'input[type="text"]', 'form', '#busqueda', '.busqueda']) {
-      intentos[sel] = await page.$(sel).then(el => !!el).catch(() => false);
+    // Capturar todos los links/tabs de navegación
+    const todosLinks = await page.$$eval('a, button[type="button"], .nav-link, [role="tab"]', (els: any[]) =>
+      els.slice(0, 30).map((el: any) => ({ tag: el.tagName, text: el.innerText?.trim().slice(0,50), href: el.href || '', id: el.id, cls: el.className?.slice(0,50) }))
+    ).catch(() => []);
+ 
+    // Intentar click en "Avanzada" y ver si #Denominacion se vuelve visible
+    let denomVisibleTrasClick = false;
+    for (const link of todosLinks) {
+      if (link.text?.toLowerCase().includes('avanzada') || link.text?.toLowerCase().includes('denominaci')) {
+        try {
+          await page.click(`text="${link.text}"`);
+          await page.waitForTimeout(500);
+          const el = await page.$('#Denominacion');
+          if (el) {
+            const visible = await el.isVisible().catch(() => false);
+            denomVisibleTrasClick = visible;
+          }
+          break;
+        } catch (_) {}
+      }
     }
  
     resultado.fuentes.playwright = {
@@ -98,9 +114,10 @@ router.get('/test', async (req: any, res: Response) => {
       titulo,
       todosInputs: todosInputs.slice(0, 20),
       iframes,
-      intentos,
-      allRequests: allRequests.slice(0, 30),
-      screenshot: `data:image/jpeg;base64,${screenshot.slice(0, 5000)}`, // primeros 5KB del screenshot
+      todosLinks: todosLinks.slice(0, 20),
+      denomVisibleTrasClick,
+      allRequests: allRequests.slice(0, 15),
+      screenshot: `data:image/jpeg;base64,${screenshot.slice(0, 5000)}`,
     };
  
     await browser.close();
