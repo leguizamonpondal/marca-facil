@@ -237,7 +237,7 @@ async function buscarPorPostINPI(
   let cookies = '';
   try {
     const { headers: respHeaders } = await axios.get(BUSQUEDA_URL, {
-      timeout: 15_000,
+      timeout: 20_000,
       headers: { 'User-Agent': UA, Accept: 'text/html', 'Accept-Language': 'es-AR,es;q=0.9' },
     });
     const setCookie = respHeaders['set-cookie'] || [];
