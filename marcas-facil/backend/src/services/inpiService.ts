@@ -226,10 +226,13 @@ export interface MarcaINPI {
   acta: string;
   denominacion: string;
   claseNiza: number;
+  tipoMarca: string;
   titular: string;
+  nroResolucion: string;
   estado: string;
   fechaSolicitud?: string;
   fechaPublicacion?: string;
+  vencimiento?: string;
 }
  
 /**
@@ -318,10 +321,13 @@ async function buscarPorPostINPI(denominacion: string, clase: number): Promise<M
         acta,
         denominacion: denom,
         claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
+        tipoMarca: String(item.TipoMarca ?? item.Tipo_Marca ?? item.tipoMarca ?? '').trim(),
         titular: String(item.Titular ?? item.titular ?? item.razon_social ?? '').trim(),
+        nroResolucion: String(item.NroResolucion ?? item.Nro_Resolucion ?? item.NumResolucion ?? item.nroResolucion ?? '').trim(),
         estado: String(item.Estado ?? item.estado ?? item.EstadoTramite ?? '').trim(),
         fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaSolicitud),
         fechaPublicacion: parseDotNetDate(item.FechaPublicacion ?? item.fechaPublicacion),
+        vencimiento: parseDotNetDate(item.Vencimiento ?? item.FechaVencimiento ?? item.fechaVencimiento),
       });
     }
  
@@ -439,10 +445,13 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number): Prom
             acta,
             denominacion: denom,
             claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
+            tipoMarca: String(item.TipoMarca ?? item.Tipo_Marca ?? item.tipoMarca ?? '').trim(),
             titular: String(item.Titular ?? item.titular ?? '').trim(),
+            nroResolucion: String(item.NroResolucion ?? item.Nro_Resolucion ?? item.nroResolucion ?? '').trim(),
             estado: String(item.Estado ?? item.estado ?? '').trim(),
             fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.fechaSolicitud),
             fechaPublicacion: parseDotNetDate(item.FechaPublicacion ?? item.fechaPublicacion),
+            vencimiento: parseDotNetDate(item.Vencimiento ?? item.FechaVencimiento ?? item.fechaVencimiento),
           });
         }
       } catch (e: any) {
