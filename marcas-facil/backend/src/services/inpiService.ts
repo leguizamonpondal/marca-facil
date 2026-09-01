@@ -346,131 +346,77 @@ export async function buscarMarcasPublicoINPI(
 const INPI_BUSQUEDA_URL = 'https://portaltramites.inpi.gob.ar/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA';
  
 async function buscarMarcasPlaywright(denominacion: string, clase: number): Promise<MarcaINPI[]> {
-  const { browser, page } = await lanzarBrowser();
+  const { browser, context, page } = await lanzarBrowser();
   const marcas: MarcaINPI[] = [];
  
   try {
     logger.info(`[INPI Playwright] Navegando a: ${INPI_BUSQUEDA_URL}`);
+    // Cargar la página para establecer sesión/cookies
     await page.goto(INPI_BUSQUEDA_URL, { waitUntil: 'networkidle', timeout: 30_000 });
  
-    // El portal tiene DOS tabs: "Búsqueda Puntual" (activa por defecto) y "Búsqueda Avanzada"
-    // El campo #Denominacion está en el tab 2 y empieza oculto (visible:false)
-    // Hay que hacer click en el tab "Avanzada" para mostrarlo
+    // Estrategia: ejecutar fetch() DESDE DENTRO del browser
+    // Esto hereda automáticamente cookies de sesión, origen y headers — sin tocar la UI
+    logger.info('[INPI Playwright] Enviando búsqueda vía fetch() interno');
+    const htmlResultado = await page.evaluate(async (params: { den: string; cls: string }) => {
+      try {
+        // FormData hereda el contexto de sesión del browser
+        const body = new URLSearchParams();
+        body.append('tipob', '1');
+        body.append('Denominacion', params.den);
+        body.append('TxtDenominacionTipoBusqueda', '1');
+        body.append('clase', params.cls);
+        body.append('vigentes', 'true');
+        body.append('BtnBuscarAvanzada', 'BUSCAR');
  
-    // Intentar click en el tab de búsqueda avanzada (múltiples selectores posibles)
-    const tabSelectors = [
-      'a:has-text("Avanzada")',
-      'a:has-text("avanzada")',
-      'li:has-text("Avanzada") a',
-      'a[href*="avanzada"]',
-      'a[href*="Avanzada"]',
-      '.nav-tabs a:nth-child(2)',
-      '.nav a:last-child',
-      '[data-toggle="tab"]:last-child',
-    ];
+        // Intentar CSRF token del DOM
+        const csrfEl = document.querySelector<HTMLInputElement>('input[name="__RequestVerificationToken"]');
+        if (csrfEl) body.append('__RequestVerificationToken', csrfEl.value);
  
-    let tabClicado = false;
-    for (const sel of tabSelectors) {
-      const tab = page.locator(sel).first();
-      if (await tab.count() > 0) {
-        await tab.click().catch(() => {});
-        tabClicado = true;
-        logger.info(`[INPI Playwright] Tab avanzada clickeado: ${sel}`);
-        break;
+        const resp = await fetch('/MarcasConsultas/Grilla', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+          credentials: 'include',
+        });
+        return resp.text();
+      } catch (e: any) {
+        return `ERROR:${e.message}`;
+      }
+    }, { den: denominacion, cls: String(clase) });
+ 
+    logger.info(`[INPI Playwright] fetch interno: ${String(htmlResultado).length} bytes`);
+ 
+    // Parsear HTML de resultados
+    const html = String(htmlResultado);
+    if (!html.startsWith('ERROR') && html.includes('<tr') && html.includes('<td')) {
+      const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+      for (const fila of filas) {
+        const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+          .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
+        if (celdas.length < 2) continue;
+        const acta = celdas[0].replace(/\D/g, '');
+        if (acta.length < 4) continue;
+        const denom = celdas[1];
+        if (!denom || denom.length < 2) continue;
+        marcas.push({ acta, denominacion: denom, claseNiza: parseInt(celdas[2]) || clase, titular: celdas[3] || '', estado: celdas[4] || '' });
       }
     }
  
-    if (!tabClicado) {
-      // Fallback: usar JavaScript para mostrar el formulario avanzado directamente
-      await page.evaluate(() => {
-        // Mostrar todos los elementos del formulario avanzado
-        const denom = document.getElementById('Denominacion');
-        if (denom) {
-          // Subir en el DOM hasta encontrar el contenedor del tab y mostrarlo
-          let el: HTMLElement | null = denom;
-          while (el && el !== document.body) {
-            if (el.style.display === 'none') el.style.display = '';
-            if (el.classList.contains('tab-pane')) el.classList.add('active', 'in');
-            el = el.parentElement;
-          }
+    // Si el fetch interno devuelve JSON
+    if (!html.startsWith('ERROR') && (html.startsWith('[') || html.startsWith('{'))) {
+      try {
+        const json = JSON.parse(html);
+        const lista: any[] = Array.isArray(json) ? json : (json.data || json.marcas || []);
+        for (const item of lista.slice(0, 100)) {
+          marcas.push({
+            acta: String(item.Acta || item.acta || ''),
+            denominacion: item.Denominacion || item.denominacion || '',
+            claseNiza: parseInt(item.Clase || item.clase || clase) || clase,
+            titular: item.Titular || item.titular || '',
+            estado: item.Estado || item.estado || '',
+          });
         }
-      });
-      logger.info('[INPI Playwright] Tab activado vía JavaScript');
-    }
- 
-    // Esperar un momento para que la animación del tab termine
-    await page.waitForTimeout(800);
- 
-    // Llenar denominación — con force:true para manejar elementos parcialmente ocultos
-    await page.fill('#Denominacion', denominacion, { force: true } as any);
- 
-    // Seleccionar clase NIZA
-    await page.selectOption('#clase', { value: String(clase) }, { force: true } as any).catch(async () => {
-      await page.selectOption('[name="clase"]', String(clase), { force: true } as any).catch(() => {});
-    });
- 
-    // Interceptar respuestas AJAX/HTML de resultados ANTES de hacer click
-    const respuestasCapturadas: Array<{ url: string; ct: string; body: string }> = [];
-    page.on('response', async resp => {
-      const url = resp.url().toLowerCase();
-      if (url.includes('grilla') || url.includes('resultado') || url.includes('busqueda')) {
-        try {
-          const ct = resp.headers()['content-type'] || '';
-          const body = await resp.text().catch(() => '');
-          respuestasCapturadas.push({ url: resp.url(), ct, body: body.slice(0, 5000) });
-        } catch (_) {}
-      }
-    });
- 
-    // Click en el botón BUSCAR del tab avanzado
-    await page.click('[name="BtnBuscarAvanzada"]', { force: true } as any);
- 
-    // Esperar que aparezcan resultados (AJAX)
-    await page.waitForTimeout(5000);
- 
-    // Procesar respuestas AJAX capturadas
-    for (const resp of respuestasCapturadas) {
-      if (resp.ct.includes('json')) {
-        try {
-          const json = JSON.parse(resp.body);
-          const lista: any[] = Array.isArray(json) ? json : (json.data || json.marcas || json.items || []);
-          for (const item of lista.slice(0, 100)) {
-            const acta = String(item.Acta || item.acta || item.NroActa || '');
-            const denom = item.Denominacion || item.denominacion || item.Nombre || '';
-            if (!denom) continue;
-            marcas.push({ acta, denominacion: denom, claseNiza: parseInt(item.Clase || item.clase || clase) || clase, titular: item.Titular || item.titular || '', estado: item.Estado || item.estado || '' });
-          }
-          if (marcas.length > 0) { logger.info(`[INPI Playwright] ${marcas.length} marcas vía AJAX JSON`); return marcas; }
-        } catch (_) {}
-      }
-      // HTML con tabla de resultados
-      if (resp.body.includes('<tr') && resp.body.includes('<td')) {
-        const filas = [...resp.body.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
-        for (const fila of filas) {
-          const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-            .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
-          if (celdas.length < 2) continue;
-          const acta = celdas[0].replace(/\D/g, '');
-          if (acta.length < 4) continue;
-          const denom = celdas[1];
-          if (!denom || denom.length < 2) continue;
-          marcas.push({ acta, denominacion: denom, claseNiza: parseInt(celdas[2]) || clase, titular: celdas[3] || '', estado: celdas[4] || '' });
-        }
-        if (marcas.length > 0) { logger.info(`[INPI Playwright] ${marcas.length} marcas vía HTML table`); return marcas; }
-      }
-    }
- 
-    // Fallback: extraer tabla directamente del DOM
-    const filas = await page.locator('table tbody tr').all();
-    for (const fila of filas.slice(0, 100)) {
-      const celdas = await fila.locator('td').all();
-      if (celdas.length < 2) continue;
-      const textos = await Promise.all(celdas.map(c => c.innerText().catch(() => '')));
-      const acta = textos[0]?.replace(/\D/g, '');
-      if (!acta || acta.length < 4) continue;
-      const denom = textos[1]?.trim();
-      if (!denom || denom.length < 2) continue;
-      marcas.push({ acta, denominacion: denom, claseNiza: parseInt(textos[2]) || clase, titular: textos[3]?.trim() || '', estado: textos[4]?.trim() || '' });
+      } catch (_) {}
     }
  
     logger.info(`[INPI Playwright] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
