@@ -418,7 +418,7 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number, titul
         const jsonBody = JSON.stringify({
           Tipo_Resolucion: '',
           Clase: params.cls,
-          TipoBusquedaDenominacion: '0',
+          TipoBusquedaDenominacion: '1',
           Denominacion: params.den,
           Titular: params.tit,
           TipoBusquedaTitular: '0',
