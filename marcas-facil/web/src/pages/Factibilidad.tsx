@@ -17,13 +17,19 @@ import { CLASES_NIZA } from '../types';
 const API_BASE = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3001';
 
 async function apiBuscarTitular(titular: string): Promise<any[]> {
-  const res = await fetch(
-    `${API_BASE}/api/factibilidad/buscar-titular?titular=${encodeURIComponent(titular)}`,
-    { headers: { 'Content-Type': 'application/json' } }
-  );
-  if (!res.ok) throw new Error(`Error ${res.status}`);
-  const json = await res.json();
-  return json.marcas ?? json ?? [];
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const res = await fetch(
+      `${API_BASE}/api/factibilidad/buscar-titular?titular=${encodeURIComponent(titular)}`,
+      { headers: { 'Content-Type': 'application/json' }, signal: controller.signal }
+    );
+    if (!res.ok) throw new Error(`Error ${res.status}`);
+    const json = await res.json();
+    return json.marcas ?? json ?? [];
+  } finally {
+    clearTimeout(tid);
+  }
 }
 
 // ── Gauge de registrabilidad ──────────────────────────────────────────────────
