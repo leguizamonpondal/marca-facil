@@ -282,7 +282,7 @@ async function buscarPorPostINPI(denominacion: string, clase: number): Promise<M
       Fecha_IngresoHasta: '',
       Fecha_ResolucionDesde: '',
       Fecha_ResolucionHasta: '',
-      vigentes: false,
+      vigentes: true,   // solo marcas vigentes — equivalente al checkbox "SOLO VIGENTES" del portal INPI
       limit: 50,
       offset: 0,
     };
@@ -399,7 +399,7 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number): Prom
           Fecha_IngresoHasta: '',
           Fecha_ResolucionDesde: '',
           Fecha_ResolucionHasta: '',
-          vigentes: false,
+          vigentes: true,   // solo marcas vigentes
           limit: 50,
           offset: 0,
         });
