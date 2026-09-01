@@ -217,33 +217,41 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
  
     logger.info(`🔍 Estudio factibilidad: "${denominacion}" Clase ${claseNiza} — Usuario ${req.user!.id}`);
  
-    // 1. Buscar en el Boletín (base de datos local de marcas publicadas/solicitadas)
-    const enBoletinMismaClase = await prisma.boletinEntrada.findMany({
-      where: { claseNiza },
-      select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true },
-    });
+    // 1. Buscar en el Boletín local — best-effort, no corta el flujo si la tabla no existe
+    let enBoletinMismaClase: Array<{ acta: string; denominacion: string; claseNiza: number; titularNombre: string }> = [];
+    try {
+      enBoletinMismaClase = await prisma.boletinEntrada.findMany({
+        where: { claseNiza },
+        select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true },
+      });
+    } catch (dbErr: any) {
+      logger.warn(`[Factibilidad] boletinEntrada no disponible: ${dbErr.message}`);
+    }
  
-    // 2. Buscar en marcas registradas propias del sistema
-    const enSistema = await prisma.marca.findMany({
-      where: {
-        claseNiza,
-        estado: { in: ['EN_TRAMITE', 'PUBLICADA', 'CONCEDIDA'] },
-      },
-      select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true, estado: true },
-    });
+    // 2. Buscar en marcas del sistema — best-effort
+    let enSistema: Array<{ acta: string | null; denominacion: string; claseNiza: number; titularNombre: string; estado: string }> = [];
+    try {
+      enSistema = await prisma.marca.findMany({
+        where: {
+          claseNiza,
+          estado: { in: ['EN_TRAMITE', 'PUBLICADA', 'CONCEDIDA'] },
+        },
+        select: { acta: true, denominacion: true, claseNiza: true, titularNombre: true, estado: true },
+      });
+    } catch (dbErr: any) {
+      logger.warn(`[Factibilidad] marcas no disponibles: ${dbErr.message}`);
+    }
  
-    // 3. Buscar en INPI público (base de datos real del registro)
-    // Se ejecuta en paralelo con el análisis local para no bloquear
+    // 3. Buscar en INPI público (fuente principal — datos reales del registro)
     let marcasINPI: Awaited<ReturnType<typeof buscarMarcasPublicoINPI>> = [];
     try {
       marcasINPI = await buscarMarcasPublicoINPI(denominacion, claseNiza);
       logger.info(`[Factibilidad] INPI público: ${marcasINPI.length} marcas para "${denominacion}" clase ${claseNiza}`);
     } catch (inpiErr: any) {
-      // No cortar el flujo si INPI falla — igual se analiza la BD local
-      logger.warn(`[Factibilidad] INPI público no disponible (se continúa con BD local): ${inpiErr.message}`);
+      logger.warn(`[Factibilidad] INPI público no disponible: ${inpiErr.message}`);
     }
  
-    // 4. Analizar confundibilidad (tres ejes: gráfico, fonético, ideológico)
+    // 4. Analizar confundibilidad (tres ejes: gráfico, fonético, ideológico — Art. 3° b) Ley 22.362)
     const antecedentes: Array<{
       fuente: 'BOLETIN' | 'SISTEMA' | 'INPI';
       acta: string;
@@ -255,9 +263,6 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       razon: string;
       estado?: string;
     }> = [];
- 
-    // Clases relacionadas a analizar también (criterio jurisprudencial INPI)
-    const clasesRelacionadas = getClasesRelacionadas(claseNiza);
  
     // Boletín local
     for (const entrada of enBoletinMismaClase) {
@@ -276,7 +281,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       }
     }
  
-    // Marcas del sistema interno
+    // Marcas del sistema
     for (const marca of enSistema) {
       const resultado = esConfundible(denominacion, marca.denominacion, claseNiza, marca.claseNiza);
       if (resultado.similitud >= 50) {
@@ -294,11 +299,10 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       }
     }
  
-    // Marcas del registro público INPI (fuente principal)
+    // Marcas del INPI (fuente principal)
     const actasVistas = new Set(antecedentes.map(a => a.acta).filter(Boolean));
     for (const marca of marcasINPI) {
       if (!marca.denominacion) continue;
-      // Evitar duplicados si la marca ya estaba en el boletín local
       if (marca.acta && actasVistas.has(marca.acta)) continue;
       const resultado = esConfundible(denominacion, marca.denominacion, claseNiza, marca.claseNiza);
       if (resultado.similitud >= 50) {
@@ -317,10 +321,9 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       }
     }
  
-    // Ordenar por similitud descendente
     antecedentes.sort((a, b) => b.similitud - a.similitud);
  
-    // 6. Determinar factibilidad
+    // 5. Determinar factibilidad
     const maxSimilitud = antecedentes.length > 0 ? antecedentes[0].similitud : 0;
     const tieneConfundibles = antecedentes.some(a => a.confundible);
  
@@ -342,37 +345,47 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       resumenDictamen = `Se detectó un antecedente con similitud del ${maxSimilitud}% (${antecedentes[0].denominacion}). El riesgo de rechazo por confundibilidad es alto. Se recomienda modificar la denominación.`;
     }
  
-    // 7. Generar PDF del estudio
-    const pdfPath = await generarPDFFactibilidad({
-      denominacion,
-      claseNiza,
-      tipoMarca: tipoMarca || 'DENOMINATIVA',
-      productos: productos || '',
-      antecedentes,
-      dictamen,
-      riesgo,
-      resumenDictamen,
-      fecha: new Date(),
-      userId: req.user!.id,
-    });
- 
-    // 8. Guardar en BD
-    const estudio = await prisma.estudioFactibilidad.create({
-      data: {
-        userId: req.user!.id,
+    // 6. Generar PDF — best-effort, no corta si falla
+    let pdfPath: string | undefined;
+    try {
+      pdfPath = await generarPDFFactibilidad({
         denominacion,
         claseNiza,
         tipoMarca: tipoMarca || 'DENOMINATIVA',
-        productos,
-        antecedentes: JSON.stringify(antecedentes),
+        productos: productos || '',
+        antecedentes,
         dictamen,
         riesgo,
         resumenDictamen,
-        pdfUrl: pdfPath,
-        totalAntecedentes: antecedentes.length,
-        antecedentesConfundibles: antecedentes.filter(a => a.confundible).length,
-      },
-    });
+        fecha: new Date(),
+        userId: req.user!.id,
+      });
+    } catch (pdfErr: any) {
+      logger.warn(`[Factibilidad] PDF no generado: ${pdfErr.message}`);
+    }
+ 
+    // 7. Guardar en BD — best-effort, devuelve resultado igual si falla
+    let estudio: any = null;
+    try {
+      estudio = await prisma.estudioFactibilidad.create({
+        data: {
+          userId: req.user!.id,
+          denominacion,
+          claseNiza,
+          tipoMarca: tipoMarca || 'DENOMINATIVA',
+          productos,
+          antecedentes: JSON.stringify(antecedentes),
+          dictamen,
+          riesgo,
+          resumenDictamen,
+          pdfUrl: pdfPath,
+          totalAntecedentes: antecedentes.length,
+          antecedentesConfundibles: antecedentes.filter(a => a.confundible).length,
+        },
+      });
+    } catch (dbErr: any) {
+      logger.warn(`[Factibilidad] No se pudo guardar en BD: ${dbErr.message}`);
+    }
  
     res.json({
       estudio,
@@ -380,7 +393,9 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       dictamen,
       riesgo,
       resumenDictamen,
-      pdfUrl: `/api/factibilidad/${estudio.id}/pdf`,
+      totalAntecedentes: antecedentes.length,
+      antecedentesINPI: marcasINPI.length,
+      ...(estudio ? { pdfUrl: `/api/factibilidad/${estudio.id}/pdf` } : {}),
     });
   } catch (err) { next(err); }
 });
