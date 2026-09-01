@@ -12,6 +12,20 @@
 import { chromium, Browser, Page, BrowserContext } from 'playwright';
 import { logger } from '../utils/logger';
  
+// ── Utilidades ───────────────────────────────────────────────────────────────
+/** Convierte el formato de fecha .NET /Date(ms)/ a string ISO o vacío */
+function parseDotNetDate(val: any): string | undefined {
+  if (!val) return undefined;
+  const s = String(val);
+  const m = s.match(/\/Date\((-?\d+)\)\//);
+  if (m) {
+    const ms = parseInt(m[1]);
+    if (isNaN(ms) || ms < -2208988800000) return undefined; // anterior a 1900 → ignorar
+    return new Date(ms).toISOString().slice(0, 10); // "YYYY-MM-DD"
+  }
+  return s || undefined;
+}
+ 
 // ── URLs ─────────────────────────────────────────────────────────────────────
 const ARCA_AUTH_URL =
   process.env.ARCA_AUTH_URL ||
@@ -306,8 +320,8 @@ async function buscarPorPostINPI(denominacion: string, clase: number): Promise<M
         claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
         titular: String(item.Titular ?? item.titular ?? item.razon_social ?? '').trim(),
         estado: String(item.Estado ?? item.estado ?? item.EstadoTramite ?? '').trim(),
-        fechaSolicitud: item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaSolicitud ?? undefined,
-        fechaPublicacion: item.FechaPublicacion ?? item.fechaPublicacion ?? undefined,
+        fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaSolicitud),
+        fechaPublicacion: parseDotNetDate(item.FechaPublicacion ?? item.fechaPublicacion),
       });
     }
  
@@ -427,8 +441,8 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number): Prom
             claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
             titular: String(item.Titular ?? item.titular ?? '').trim(),
             estado: String(item.Estado ?? item.estado ?? '').trim(),
-            fechaSolicitud: item.FechaIngreso ?? item.fechaSolicitud ?? undefined,
-            fechaPublicacion: item.FechaPublicacion ?? item.fechaPublicacion ?? undefined,
+            fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.fechaSolicitud),
+            fechaPublicacion: parseDotNetDate(item.FechaPublicacion ?? item.fechaPublicacion),
           });
         }
       } catch (e: any) {
