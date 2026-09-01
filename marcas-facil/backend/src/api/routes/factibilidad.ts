@@ -1,4 +1,3 @@
-
 /**
  * Rutas de Estudio de Factibilidad — MARCA FÁCIL
  *
@@ -92,42 +91,86 @@ router.get('/test', async (req: any, res: Response) => {
       els.slice(0, 30).map((el: any) => ({ tag: el.tagName, text: el.innerText?.trim().slice(0,50), href: el.href || '', id: el.id, cls: el.className?.slice(0,50) }))
     ).catch(() => []);
  
-    // Ejecutar fetch() desde dentro del browser (hereda cookies de sesión)
-    const fetchResult = await page.evaluate(async (params: { den: string; cls: string }) => {
-      try {
-        const body = new URLSearchParams();
-        body.append('tipob', '1');
-        body.append('Denominacion', params.den);
-        body.append('TxtDenominacionTipoBusqueda', '1');
-        body.append('clase', params.cls);
-        body.append('vigentes', 'true');
-        body.append('BtnBuscarAvanzada', 'BUSCAR');
-        const csrfEl = document.querySelector<HTMLInputElement>('input[name="__RequestVerificationToken"]');
-        if (csrfEl) body.append('__RequestVerificationToken', csrfEl.value);
-        const resp = await fetch('/MarcasConsultas/Grilla', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-Requested-With': 'XMLHttpRequest',
-          },
-          body: body.toString(),
-          credentials: 'include',
-        });
-        const text = await resp.text();
-        return { status: resp.status, length: text.length, snippet: text.slice(0, 1500), tieneTR: text.includes('<tr'), tieneTD: text.includes('<td') };
-      } catch (e: any) {
-        return { error: e.message };
+    // Capturar TODOS los POST que hace la página (para ver qué URL y params usa el botón real)
+    const postRequests: Array<{ url: string; postData: string; responseLength?: number; responseTD?: boolean }> = [];
+    page.on('request', req => {
+      if (req.method() === 'POST') {
+        postRequests.push({ url: req.url(), postData: req.postData() || '' });
       }
+    });
+    page.on('response', async resp => {
+      if (resp.request().method() === 'POST') {
+        const match = postRequests.find(r => r.url === resp.url());
+        if (match) {
+          const body = await resp.text().catch(() => '');
+          match.responseLength = body.length;
+          match.responseTD = body.includes('<td');
+        }
+      }
+    });
+ 
+    // Capturar onclick y atributos del botón BUSCAR
+    const btnInfo = await page.evaluate(() => {
+      const btn = document.querySelector('[name="BtnBuscarAvanzada"]') as any;
+      if (!btn) return null;
+      return { onclick: btn.getAttribute('onclick'), type: btn.type, id: btn.id, formAction: btn.form?.action };
+    });
+ 
+    // Capturar scripts que mencionen 'Grilla', 'buscar', 'ajax'
+    const scriptRelevante = await page.evaluate(() => {
+      const scripts = Array.from(document.querySelectorAll('script:not([src])'));
+      for (const s of scripts) {
+        const txt = s.textContent || '';
+        if (txt.toLowerCase().includes('grilla') || txt.toLowerCase().includes('buscaravanzada') || txt.includes('BtnBuscar')) {
+          return txt.slice(0, 3000);
+        }
+      }
+      return null;
+    });
+ 
+    // Activar tab avanzada vía jQuery y hacer click real en el botón
+    await page.evaluate(() => {
+      const $ = (window as any).$;
+      if ($) {
+        // Buscar el tab-pane que contiene #Denominacion
+        const pane = $('#Denominacion').closest('.tab-pane, .collapse, [role="tabpanel"]');
+        if (pane.length) {
+          const id = pane.attr('id');
+          pane.addClass('active in show').css('display', '');
+          if (id) $(`[href="#${id}"], [data-target="#${id}"]`).addClass('active');
+        }
+      }
+      // Forzar visibilidad subiendo por el DOM
+      let el: HTMLElement | null = document.getElementById('Denominacion');
+      while (el && el !== document.body) {
+        if ((el as HTMLElement).style) (el as HTMLElement).style.display = '';
+        el = el.parentElement;
+      }
+    });
+    await page.waitForTimeout(500);
+ 
+    // Setear valores y disparar el click
+    await page.evaluate(({ den, cls }: { den: string; cls: string }) => {
+      const d = document.getElementById('Denominacion') as HTMLInputElement;
+      if (d) { d.value = den; d.dispatchEvent(new Event('input', { bubbles: true })); }
+      const c = document.getElementById('clase') as HTMLSelectElement;
+      if (c) { c.value = cls; c.dispatchEvent(new Event('change', { bubbles: true })); }
+      // Click real en el botón
+      const btn = document.querySelector('[name="BtnBuscarAvanzada"]') as HTMLElement;
+      if (btn) btn.click();
     }, { den: denominacion, cls: String(clase) });
+ 
+    await page.waitForTimeout(5000);
  
     resultado.fuentes.playwright = {
       ms: Date.now() - t0,
       urlFinal,
       titulo,
       iframes,
-      todosLinks: todosLinks.slice(0, 15),
-      fetchInterno: fetchResult,
-      allRequests: allRequests.slice(0, 10),
+      btnInfo,
+      scriptRelevante: scriptRelevante?.slice(0, 2000),
+      postRequests,
+      allRequests: allRequests.filter(r => r.includes('POST') || r.includes('Grilla') || r.includes('busqueda')).slice(0, 15),
     };
  
     await browser.close();
