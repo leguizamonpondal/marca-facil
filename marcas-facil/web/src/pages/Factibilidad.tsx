@@ -195,21 +195,18 @@ function ResultadoFactibilidad({
     const labelDictamen = dictamen === 'VIABLE' ? 'VIABLE' : dictamen === 'NO_VIABLE' ? 'NO VIABLE' : 'CONDICIONADA';
 
     const filasAntecedentes = antecedentes.length === 0
-      ? '<tr><td colspan="6" style="text-align:center;color:#6b7280;padding:16px">Sin antecedentes encontrados en el período analizado</td></tr>'
+      ? '<tr><td colspan="9" style="text-align:center;color:#6b7280;padding:16px">Sin antecedentes encontrados en el período analizado</td></tr>'
       : antecedentes.map((a: any) => `
           <tr style="border-bottom:1px solid #e5e7eb">
-            <td style="padding:8px 6px;font-size:12px">${a.acta || '—'}</td>
-            <td style="padding:8px 6px;font-size:12px;font-weight:600">${a.denominacion}</td>
-            <td style="padding:8px 6px;font-size:12px;text-align:center">${a.clase}</td>
-            <td style="padding:8px 6px;font-size:12px;text-align:center">
-              <span style="background:${a.confundible ? '#fee2e2' : '#f3f4f6'};color:${a.confundible ? '#dc2626' : '#374151'};padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600">
-                ${a.similitud}%
-              </span>
-            </td>
-            <td style="padding:8px 6px;font-size:12px;color:${a.confundible ? '#dc2626' : '#15803d'};font-weight:600">
-              ${a.confundible ? 'Confundible' : 'Similar'}
-            </td>
-            <td style="padding:8px 6px;font-size:11px;color:#6b7280">${a.fuente}</td>
+            <td style="padding:8px 6px;font-size:11px;color:#6b7280">${a.acta || '—'}</td>
+            <td style="padding:8px 6px;font-size:12px;font-weight:600">${a.titular || '—'}</td>
+            <td style="padding:8px 6px;font-size:11px;color:#374151">${a.fechaSolicitud || '—'}</td>
+            <td style="padding:8px 6px;font-size:12px;text-align:center">${a.claseNiza ?? a.clase ?? '—'}</td>
+            <td style="padding:8px 6px;font-size:12px;font-weight:700">${a.denominacion}</td>
+            <td style="padding:8px 6px;font-size:11px;color:#374151">${a.tipoMarca || '—'}</td>
+            <td style="padding:8px 6px;font-size:11px;color:#6b7280">${a.nroResolucion || '—'}</td>
+            <td style="padding:8px 6px;font-size:11px;color:#374151">${a.estado || '—'}</td>
+            <td style="padding:8px 6px;font-size:11px;color:#374151">${a.vencimiento || '—'}</td>
           </tr>
         `).join('');
 
@@ -307,12 +304,15 @@ function ResultadoFactibilidad({
     <table>
       <thead>
         <tr>
-          <th>Acta</th>
-          <th>Denominación</th>
+          <th>Nro. Acta</th>
+          <th>Titulares</th>
+          <th>F. Ingreso</th>
           <th style="text-align:center">Clase</th>
-          <th style="text-align:center">Similitud</th>
-          <th>Valoración</th>
-          <th>Fuente</th>
+          <th>Denominación</th>
+          <th>Tipo</th>
+          <th>Nro. Res.</th>
+          <th>Estado</th>
+          <th>Vencimiento</th>
         </tr>
       </thead>
       <tbody>
@@ -389,29 +389,29 @@ function ResultadoFactibilidad({
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
                 <tr>
-                  <th className="px-4 py-3 text-left">Denominación</th>
-                  <th className="px-4 py-3 text-center">Clase</th>
-                  <th className="px-4 py-3 text-center">Similitud</th>
-                  <th className="px-4 py-3 text-left">Valoración</th>
-                  <th className="px-4 py-3 text-left">Fuente</th>
+                  <th className="px-3 py-3 text-left">Acta</th>
+                  <th className="px-3 py-3 text-left">Titular</th>
+                  <th className="px-3 py-3 text-left">F. Ingreso</th>
+                  <th className="px-3 py-3 text-center">Clase</th>
+                  <th className="px-3 py-3 text-left">Denominación</th>
+                  <th className="px-3 py-3 text-left">Tipo</th>
+                  <th className="px-3 py-3 text-left">Nro. Res.</th>
+                  <th className="px-3 py-3 text-left">Estado</th>
+                  <th className="px-3 py-3 text-left">Vencimiento</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {antecedentes.map((a: any, i: number) => (
                   <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-900">{a.denominacion}</td>
-                    <td className="px-4 py-3 text-center text-gray-600">{a.clase}</td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${
-                        a.confundible ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'
-                      }`}>
-                        {a.similitud}%
-                      </span>
-                    </td>
-                    <td className={`px-4 py-3 text-xs font-semibold ${a.confundible ? 'text-red-600' : 'text-green-600'}`}>
-                      {a.confundible ? 'Confundible' : 'Similar'}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-500">{a.fuente}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{a.acta || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-700 max-w-[140px] truncate">{a.titular || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{a.fechaSolicitud || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-center text-gray-600">{a.claseNiza ?? a.clase ?? '—'}</td>
+                    <td className="px-3 py-2 text-sm font-semibold text-gray-900">{a.denominacion}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{a.tipoMarca || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{a.nroResolucion || '—'}</td>
+                    <td className="px-3 py-2 text-xs font-medium text-gray-700">{a.estado || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{a.vencimiento || '—'}</td>
                   </tr>
                 ))}
               </tbody>
