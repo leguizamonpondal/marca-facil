@@ -272,7 +272,7 @@ async function buscarPorPostINPI(
     };
 
     const { data } = await axios.post(GRILLA_URL, jsonBody, {
-      timeout: 25_000,
+      timeout: 45_000,
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/javascript, */*; q=0.01',
