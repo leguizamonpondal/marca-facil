@@ -219,108 +219,123 @@ export interface MarcaINPI {
 }
  
 /**
- * Busca marcas en el INPI Argentina mediante POST directo al formulario de búsqueda.
- * No requiere Playwright ni autenticación.
+ * Busca marcas en el INPI Argentina mediante POST directo al endpoint JSON real.
  *
- * Estructura del formulario descubierta mediante inspección del portal:
- *   POST https://portaltramites.inpi.gob.ar/MarcasConsultas/Grilla
- *   Campos: tipob=1, Denominacion=<texto>, clase=<número>, TxtDenominacionTipoBusqueda=<modo>
+ * Endpoint descubierto mediante análisis de tráfico de red del portal:
+ *   POST https://portaltramites.inpi.gob.ar/MarcasConsultas/GrillaMarcasAvanzada
+ *   Content-Type: application/json
+ *   Requiere cookies de sesión (se obtienen con GET previo al portal)
  *
- * La respuesta es HTML con una tabla de resultados que parseamos con regex.
+ * La respuesta es JSON con la lista de marcas.
  */
 async function buscarPorPostINPI(denominacion: string, clase: number): Promise<MarcaINPI[]> {
   const { default: axios } = await import('axios');
-  const qs = await import('querystring');
  
   const BASE = 'https://portaltramites.inpi.gob.ar';
   const BUSQUEDA_URL = `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`;
-  const GRILLA_URL = `${BASE}/MarcasConsultas/Grilla`;
+  const GRILLA_URL = `${BASE}/MarcasConsultas/GrillaMarcasAvanzada`;
  
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
  
-  // Paso 1: GET al portal para obtener cookies de sesión y token CSRF (ASP.NET)
+  // Paso 1: GET al portal para obtener cookies de sesión (ASP.NET Session)
   let cookies = '';
-  let csrfToken = '';
   try {
-    const { data: htmlGet, headers: respHeaders } = await axios.get(BUSQUEDA_URL, {
+    const { headers: respHeaders } = await axios.get(BUSQUEDA_URL, {
       timeout: 15_000,
       headers: { 'User-Agent': UA, Accept: 'text/html', 'Accept-Language': 'es-AR,es;q=0.9' },
     });
-    // Extraer cookie de sesión
     const setCookie = respHeaders['set-cookie'] || [];
     cookies = Array.isArray(setCookie)
       ? setCookie.map((c: string) => c.split(';')[0]).join('; ')
       : String(setCookie).split(';')[0];
- 
-    // Extraer token CSRF de ASP.NET si existe
-    const csrfMatch = String(htmlGet).match(
-      /name="__RequestVerificationToken"[^>]*value="([^"]+)"/i
-    ) || String(htmlGet).match(/name="_token"[^>]*value="([^"]+)"/i);
-    if (csrfMatch) csrfToken = csrfMatch[1];
- 
-    logger.info(`[INPI POST] Sesión establecida. Cookies: ${cookies.slice(0, 60)}... CSRF: ${csrfToken ? 'OK' : 'no encontrado'}`);
+    logger.info(`[INPI POST] Sesión establecida. Cookies: ${cookies.slice(0, 80)}...`);
   } catch (err: any) {
     logger.warn(`[INPI POST] Error obteniendo sesión: ${err.message}`);
   }
  
   const marcas: MarcaINPI[] = [];
-  const actasVistas = new Set<string>();
  
-  // Paso 2: POST al endpoint de búsqueda con cookies + CSRF
+  // Paso 2: POST JSON al endpoint real descubierto
   try {
-    const formData: Record<string, string> = {
-      tipob: '1',
+    const jsonBody = {
+      Tipo_Resolucion: '',
+      Clase: String(clase),
+      TipoBusquedaDenominacion: '0',   // 0 = Contiene
       Denominacion: denominacion,
-      TxtDenominacionTipoBusqueda: '1',   // 1 = Contiene
-      clase: String(clase),
-      vigentes: 'true',
-      BtnBuscarAvanzada: 'BUSCAR',
+      Titular: '',
+      TipoBusquedaTitular: '0',
+      Fecha_IngresoDesde: '',
+      Fecha_IngresoHasta: '',
+      Fecha_ResolucionDesde: '',
+      Fecha_ResolucionHasta: '',
+      vigentes: false,
+      limit: 50,
+      offset: 0,
     };
-    if (csrfToken) formData['__RequestVerificationToken'] = csrfToken;
  
-    const { data: htmlPost } = await axios.post(GRILLA_URL, qs.stringify(formData), {
+    const { data } = await axios.post(GRILLA_URL, jsonBody, {
       timeout: 25_000,
       headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
         'User-Agent': UA,
         'Referer': BUSQUEDA_URL,
         'Origin': BASE,
-        'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'es-AR,es;q=0.9',
         ...(cookies ? { Cookie: cookies } : {}),
       },
-      maxRedirects: 5,
+      maxRedirects: 0,
     });
  
-    const html = String(htmlPost);
-    logger.info(`[INPI POST] Respuesta recibida: ${html.length} bytes`);
+    logger.info(`[INPI POST] Respuesta JSON recibida: ${JSON.stringify(data).length} bytes`);
  
-    // Parsear tabla de resultados
-    // Estructura INPI: <tr> → celdas: Acta | Denominación | Clase | Titular | Estado
-    const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
-    for (const fila of filas) {
-      const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-        .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
-      if (celdas.length < 2) continue;
-      const posibleActa = celdas[0].replace(/\D/g, '');
-      if (posibleActa.length < 4) continue;
-      if (actasVistas.has(posibleActa)) continue;
-      actasVistas.add(posibleActa);
-      const denom = celdas[1] || '';
-      if (!denom || denom.length < 2) continue;
+    // Parsear respuesta JSON
+    // La respuesta puede ser: array directo, { data: [...] }, { marcas: [...] }, { rows: [...] }
+    const lista: any[] = Array.isArray(data)
+      ? data
+      : (data?.data ?? data?.marcas ?? data?.rows ?? data?.resultado ?? []);
+ 
+    for (const item of lista) {
+      const acta = String(item.Acta ?? item.acta ?? item.NumActa ?? item.nro_acta ?? '').replace(/\D/g, '');
+      const denom = String(item.Denominacion ?? item.denominacion ?? item.nombre ?? '').trim();
+      if (!acta || acta.length < 3 || !denom) continue;
       marcas.push({
-        acta: posibleActa,
+        acta,
         denominacion: denom,
-        claseNiza: parseInt(celdas[2]) || clase,
-        titular: celdas[3] || '',
-        estado: celdas[4] || '',
-        fechaSolicitud: celdas[5] || undefined,
-        fechaPublicacion: celdas[6] || undefined,
+        claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
+        titular: String(item.Titular ?? item.titular ?? item.razon_social ?? '').trim(),
+        estado: String(item.Estado ?? item.estado ?? item.EstadoTramite ?? '').trim(),
+        fechaSolicitud: item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaSolicitud ?? undefined,
+        fechaPublicacion: item.FechaPublicacion ?? item.fechaPublicacion ?? undefined,
       });
     }
  
+    // Si la respuesta es un string HTML en vez de JSON, intentar parsear tabla
+    if (marcas.length === 0 && typeof data === 'string' && String(data).includes('<tr')) {
+      const html = String(data);
+      const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+      for (const fila of filas) {
+        const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
+          .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
+        if (celdas.length < 2) continue;
+        const acta = celdas[0].replace(/\D/g, '');
+        if (acta.length < 4) continue;
+        const denom = celdas[1] || '';
+        if (!denom || denom.length < 2) continue;
+        marcas.push({
+          acta,
+          denominacion: denom,
+          claseNiza: parseInt(celdas[2]) || clase,
+          titular: celdas[3] || '',
+          estado: celdas[4] || '',
+          fechaSolicitud: celdas[5] || undefined,
+        });
+      }
+    }
+ 
   } catch (err: any) {
-    logger.warn(`[INPI POST] Error en búsqueda: ${err.message}`);
+    logger.warn(`[INPI POST] Error en búsqueda JSON: ${err.message}`);
   }
  
   logger.info(`[INPI POST] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
@@ -354,72 +369,71 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number): Prom
     // Cargar la página para establecer sesión/cookies
     await page.goto(INPI_BUSQUEDA_URL, { waitUntil: 'networkidle', timeout: 30_000 });
  
-    // Estrategia: ejecutar fetch() DESDE DENTRO del browser
-    // Esto hereda automáticamente cookies de sesión, origen y headers — sin tocar la UI
-    logger.info('[INPI Playwright] Enviando búsqueda vía fetch() interno');
-    const htmlResultado = await page.evaluate(async (params: { den: string; cls: string }) => {
+    // Estrategia: POST JSON al endpoint real /GrillaMarcasAvanzada desde dentro del browser
+    // Hereda automáticamente cookies de sesión del GET previo
+    logger.info('[INPI Playwright] Enviando búsqueda JSON vía fetch() interno a GrillaMarcasAvanzada');
+    const respuesta = await page.evaluate(async (params: { den: string; cls: string }) => {
       try {
-        // FormData hereda el contexto de sesión del browser
-        const body = new URLSearchParams();
-        body.append('tipob', '1');
-        body.append('Denominacion', params.den);
-        body.append('TxtDenominacionTipoBusqueda', '1');
-        body.append('clase', params.cls);
-        body.append('vigentes', 'true');
-        body.append('BtnBuscarAvanzada', 'BUSCAR');
+        const jsonBody = JSON.stringify({
+          Tipo_Resolucion: '',
+          Clase: params.cls,
+          TipoBusquedaDenominacion: '0',
+          Denominacion: params.den,
+          Titular: '',
+          TipoBusquedaTitular: '0',
+          Fecha_IngresoDesde: '',
+          Fecha_IngresoHasta: '',
+          Fecha_ResolucionDesde: '',
+          Fecha_ResolucionHasta: '',
+          vigentes: false,
+          limit: 50,
+          offset: 0,
+        });
  
-        // Intentar CSRF token del DOM
-        const csrfEl = document.querySelector<HTMLInputElement>('input[name="__RequestVerificationToken"]');
-        if (csrfEl) body.append('__RequestVerificationToken', csrfEl.value);
- 
-        const resp = await fetch('/MarcasConsultas/Grilla', {
+        const resp = await fetch('/MarcasConsultas/GrillaMarcasAvanzada', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
             'X-Requested-With': 'XMLHttpRequest',
           },
-          body: body.toString(),
+          body: jsonBody,
           credentials: 'include',
         });
-        return resp.text();
+        const text = await resp.text();
+        return { ok: resp.ok, status: resp.status, body: text };
       } catch (e: any) {
-        return `ERROR:${e.message}`;
+        return { ok: false, status: 0, body: `ERROR:${e.message}` };
       }
     }, { den: denominacion, cls: String(clase) });
  
-    logger.info(`[INPI Playwright] fetch interno: ${String(htmlResultado).length} bytes`);
+    logger.info(`[INPI Playwright] Respuesta: status=${respuesta.status}, bytes=${respuesta.body.length}`);
  
-    // Parsear HTML de resultados
-    const html = String(htmlResultado);
-    if (!html.startsWith('ERROR') && html.includes('<tr') && html.includes('<td')) {
-      const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
-      for (const fila of filas) {
-        const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
-          .map(c => c[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim());
-        if (celdas.length < 2) continue;
-        const acta = celdas[0].replace(/\D/g, '');
-        if (acta.length < 4) continue;
-        const denom = celdas[1];
-        if (!denom || denom.length < 2) continue;
-        marcas.push({ acta, denominacion: denom, claseNiza: parseInt(celdas[2]) || clase, titular: celdas[3] || '', estado: celdas[4] || '' });
-      }
-    }
- 
-    // Si el fetch interno devuelve JSON
-    if (!html.startsWith('ERROR') && (html.startsWith('[') || html.startsWith('{'))) {
+    // Parsear JSON
+    const body = respuesta.body;
+    if (!body.startsWith('ERROR') && (body.startsWith('[') || body.startsWith('{'))) {
       try {
-        const json = JSON.parse(html);
-        const lista: any[] = Array.isArray(json) ? json : (json.data || json.marcas || []);
-        for (const item of lista.slice(0, 100)) {
+        const json = JSON.parse(body);
+        const lista: any[] = Array.isArray(json)
+          ? json
+          : (json?.data ?? json?.marcas ?? json?.rows ?? json?.resultado ?? []);
+        for (const item of lista) {
+          const acta = String(item.Acta ?? item.acta ?? item.NumActa ?? '').replace(/\D/g, '');
+          const denom = String(item.Denominacion ?? item.denominacion ?? '').trim();
+          if (!acta || acta.length < 3 || !denom) continue;
           marcas.push({
-            acta: String(item.Acta || item.acta || ''),
-            denominacion: item.Denominacion || item.denominacion || '',
-            claseNiza: parseInt(item.Clase || item.clase || clase) || clase,
-            titular: item.Titular || item.titular || '',
-            estado: item.Estado || item.estado || '',
+            acta,
+            denominacion: denom,
+            claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
+            titular: String(item.Titular ?? item.titular ?? '').trim(),
+            estado: String(item.Estado ?? item.estado ?? '').trim(),
+            fechaSolicitud: item.FechaIngreso ?? item.fechaSolicitud ?? undefined,
+            fechaPublicacion: item.FechaPublicacion ?? item.fechaPublicacion ?? undefined,
           });
         }
-      } catch (_) {}
+      } catch (e: any) {
+        logger.warn(`[INPI Playwright] Error parseando JSON: ${e.message}. Body: ${body.slice(0, 200)}`);
+      }
     }
  
     logger.info(`[INPI Playwright] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
