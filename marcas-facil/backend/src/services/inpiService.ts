@@ -258,7 +258,7 @@ async function buscarPorPostINPI(
     const jsonBody = {
       Tipo_Resolucion: '',
       Clase: clase > 0 ? String(clase) : '',
-      TipoBusquedaDenominacion: '0',
+      TipoBusquedaDenominacion: '1',
       Denominacion: denominacion,
       Titular: titular,
       TipoBusquedaTitular: '0',
