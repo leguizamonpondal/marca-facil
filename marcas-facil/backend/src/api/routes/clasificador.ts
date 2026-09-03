@@ -4,7 +4,7 @@
  * Idioma fijo: español (es)
  */
 import { Router, Request, Response } from 'express';
-import { authenticateJWT } from '../../middleware/auth';
+import { authenticate } from '../../middleware/auth';
 import { logger } from '../../utils/logger';
  
 const router = Router();
