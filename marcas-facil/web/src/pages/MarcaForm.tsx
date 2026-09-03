@@ -1,8 +1,8 @@
 /**
- * Formulario Nueva Marca / Editar — MARCAS FÁCIL
+ * Formulario Nueva Marca / Editar — MARCA FÁCIL
  */
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Save, AlertCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -31,8 +31,12 @@ const ESTADOS_DISPONIBLES = [
 export default function MarcaForm() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const isEdit = !!id;
+
+  // Pre-relleno desde el flujo "Registrar marca"
+  const preRelleno = (location.state as any) || {};
 
   const { data: marcaExistente, isLoading } = useQuery({
     queryKey: ['marca', id],
@@ -41,16 +45,16 @@ export default function MarcaForm() {
   });
 
   const [form, setForm] = useState({
-    denominacion: marcaExistente?.denominacion || '',
-    claseNiza: marcaExistente?.claseNiza || 35,
+    denominacion: marcaExistente?.denominacion || preRelleno.denominacion || '',
+    claseNiza: marcaExistente?.claseNiza || preRelleno.claseNiza || 35,
     tipoMarca: marcaExistente?.tipoMarca || 'DENOMINATIVA',
     estado: marcaExistente?.estado || 'BORRADOR',
     numeroActa: marcaExistente?.numeroActa || '',
     numeroCertificado: marcaExistente?.numeroCertificado || '',
     fechaSolicitud: marcaExistente?.fechaSolicitud?.slice(0, 10) || '',
     fechaConcesion: marcaExistente?.fechaConcesion?.slice(0, 10) || '',
-    descripcionProductos: marcaExistente?.descripcionProductos || '',
-    notas: marcaExistente?.notas || '',
+    descripcionProductos: marcaExistente?.descripcionProductos || preRelleno.descripcionProductos || '',
+    notas: marcaExistente?.notas || (preRelleno.titular ? `Titular: ${preRelleno.titular}` : ''),
   });
 
   // Sincronizar con datos cargados
