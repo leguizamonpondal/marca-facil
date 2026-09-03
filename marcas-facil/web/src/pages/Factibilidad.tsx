@@ -20,9 +20,16 @@ async function apiBuscarTitular(titular: string): Promise<any[]> {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), 60_000);
   try {
+    const token = localStorage.getItem('mf_token');
     const res = await fetch(
       `${API_BASE}/api/factibilidad/buscar-titular?titular=${encodeURIComponent(titular)}`,
-      { headers: { 'Content-Type': 'application/json' }, signal: controller.signal }
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: controller.signal,
+      }
     );
     if (!res.ok) throw new Error(`Error ${res.status}`);
     const json = await res.json();
