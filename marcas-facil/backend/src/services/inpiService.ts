@@ -1,4 +1,3 @@
-
 /**
  * Servicio de integración con el portal INPI (Trámites en Línea)
  * Autenticación vía ARCA (ex-AFIP) Clave Fiscal nivel 2+
@@ -353,8 +352,20 @@ async function buscarPorPostINPI(
         denominacion: denom,
         claseNiza: parseInt(String(item.Clase ?? item.clase ?? clase)) || clase,
         tipoMarca: String(item.TipoMarca ?? item.Tipo_Marca ?? item.tipoMarca ?? '').trim(),
-        titular: String(item.Titular ?? item.titular ?? item.razon_social ?? '').trim(),
-        titularCuit: String(item.TitularCuit ?? item.Cuit ?? item.cuit ?? item.CUIT ?? item.titular_cuit ?? '').trim() || undefined,
+        // El INPI devuelve el titular como: "20284614780 LEGUIZAMON PONDAL HONORIO MARTINIANO 100.00%"
+        // Intentamos capturar el campo con distintos nombres posibles
+        ...(() => {
+          const raw = String(
+            item.TitularesAsignados ?? item.Titulares ?? item.titularesAsignados ??
+            item.Titular ?? item.titular ?? item.razon_social ?? ''
+          ).trim();
+          // Extraer CUIT y nombre del formato "CUIT NOMBRE 100.00%"
+          const m = raw.match(/^(\d{10,11})\s+(.+?)(?:\s+\d+[\.,]\d+%.*)?$/);
+          return {
+            titular: m ? m[2].trim() : raw,
+            titularCuit: m ? m[1] : undefined,
+          };
+        })(),
         nroResolucion: String(item.NroResolucion ?? item.Nro_Resolucion ?? item.NumResolucion ?? item.nroResolucion ?? '').trim(),
         estado: String(item.Estado ?? item.estado ?? item.EstadoTramite ?? '').trim(),
         fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaSolicitud),
