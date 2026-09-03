@@ -16,6 +16,29 @@ import { CLASES_NIZA } from '../types';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const API_BASE = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3001';
 
+async function apiBuscarCuit(cuit: string): Promise<any[]> {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const token = localStorage.getItem('mf_token');
+    const res = await fetch(
+      `${API_BASE}/api/factibilidad/buscar-cuit?cuit=${encodeURIComponent(cuit)}`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        signal: controller.signal,
+      }
+    );
+    if (!res.ok) throw new Error(`Error ${res.status}`);
+    const json = await res.json();
+    return json.marcas ?? json ?? [];
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
 async function apiBuscarTitular(titular: string): Promise<any[]> {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), 60_000);
@@ -104,7 +127,7 @@ function GaugeRegistrabilidad({ pct, recomienda }: { pct: number; recomienda: bo
 }
 
 export default function Factibilidad() {
-  const [modo, setModo] = useState<'denominacion' | 'titular'>('denominacion');
+  const [modo, setModo] = useState<'denominacion' | 'titular' | 'cuit'>('denominacion');
 
   // Modo denominación
   const [denominacion, setDenominacion] = useState('');
@@ -114,6 +137,10 @@ export default function Factibilidad() {
   // Modo titular
   const [titular, setTitular]                   = useState('');
   const [resultadoTitular, setResultadoTitular] = useState<any[] | null>(null);
+
+  // Modo CUIT
+  const [cuit, setCuit]                   = useState('');
+  const [resultadoCuit, setResultadoCuit] = useState<any[] | null>(null);
 
   const { data: historial, isLoading: loadingHistorial } = useQuery({
     queryKey: ['factibilidad-historial'],
@@ -132,8 +159,15 @@ export default function Factibilidad() {
     onError: () => toast.error('Error al buscar por titular. Verificá la conexión con el servidor.'),
   });
 
-  const puedeConsultarDenom = denominacion.trim().length >= 2;
-  const puedeConsultarTitular = titular.trim().length >= 2;
+  const cuitMutation = useMutation({
+    mutationFn: () => apiBuscarCuit(cuit),
+    onSuccess: (data) => setResultadoCuit(data),
+    onError: () => toast.error('Error al buscar por CUIT. Verificá la conexión con el servidor.'),
+  });
+
+  const puedeConsultarDenom    = denominacion.trim().length >= 2;
+  const puedeConsultarTitular  = titular.trim().length >= 2;
+  const puedeConsultarCuit     = cuit.replace(/\D/g, '').length >= 10;
 
   return (
     <div className="space-y-5">
@@ -157,13 +191,22 @@ export default function Factibilidad() {
           Por denominación
         </button>
         <button
-          onClick={() => { setModo('titular'); setResultado(null); }}
+          onClick={() => { setModo('titular'); setResultado(null); setResultadoCuit(null); }}
           className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 ${
             modo === 'titular' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
           <Building2 className="w-4 h-4" />
           Por titular
+        </button>
+        <button
+          onClick={() => { setModo('cuit'); setResultado(null); setResultadoTitular(null); }}
+          className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 ${
+            modo === 'cuit' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <Search className="w-4 h-4" />
+          Por CUIT
         </button>
       </div>
 
@@ -279,6 +322,46 @@ export default function Factibilidad() {
         </div>
       )}
 
+      {/* ── FORMULARIO: Búsqueda por CUIT ── */}
+      {modo === 'cuit' && (
+        <div className="card p-6 space-y-4">
+          <h2 className="section-title">Buscar marcas por CUIT del titular</h2>
+          <p className="text-sm text-gray-500">
+            Ingresá el CUIT del titular (con o sin guiones) para ver todas sus marcas registradas en el INPI.
+          </p>
+          <div>
+            <label className="label">CUIT del titular *</label>
+            <input
+              type="text"
+              value={cuit}
+              onChange={(e) => setCuit(e.target.value)}
+              className="input"
+              placeholder="Ej: 20-12345678-9 o 20123456789"
+            />
+          </div>
+          <button
+            onClick={() => cuitMutation.mutate()}
+            disabled={!puedeConsultarCuit || cuitMutation.isPending}
+            className="btn-primary w-full justify-center py-3"
+          >
+            {cuitMutation.isPending ? (
+              <><Spinner size="sm" />Buscando marcas...</>
+            ) : (
+              <><Search className="w-5 h-5" />Buscar por CUIT</>
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* ── RESULTADO: CUIT ── */}
+      {modo === 'cuit' && resultadoCuit !== null && (
+        <ResultadoTitular
+          marcas={resultadoCuit}
+          titular={`CUIT ${cuit}`}
+          onNuevaBusqueda={() => setResultadoCuit(null)}
+        />
+      )}
+
       {/* ── RESULTADO: Denominación ── */}
       {modo === 'denominacion' && resultado && (
         <ResultadoFactibilidad
@@ -379,6 +462,8 @@ function ResultadoTitular({ marcas, titular, onNuevaBusqueda }: {
               <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
                 <tr>
                   <th className="px-3 py-3 text-left">Acta</th>
+                  <th className="px-3 py-3 text-left">Titular</th>
+                  <th className="px-3 py-3 text-left">CUIT</th>
                   <th className="px-3 py-3 text-left">Denominación</th>
                   <th className="px-3 py-3 text-center">Cl.</th>
                   <th className="px-3 py-3 text-left">Tipo</th>
@@ -392,6 +477,8 @@ function ResultadoTitular({ marcas, titular, onNuevaBusqueda }: {
                 {marcas.map((m: any, i: number) => (
                   <tr key={i} className="hover:bg-gray-50">
                     <td className="px-3 py-2 text-xs text-gray-500">{m.acta || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-700 max-w-[130px] truncate">{m.titular || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{m.titularCuit || '—'}</td>
                     <td className="px-3 py-2 text-sm font-semibold text-gray-900">{m.denominacion}</td>
                     <td className="px-3 py-2 text-xs text-center text-gray-600">{m.claseNiza ?? m.clase ?? '—'}</td>
                     <td className="px-3 py-2 text-xs text-gray-500">{m.tipoMarca || '—'}</td>
