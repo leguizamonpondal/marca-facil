@@ -365,11 +365,19 @@ async function buscarPorPostINPI(
             item.Titulares ?? item.TitularesAsignados ?? item.titularesAsignados ??
             item.Titular ?? item.titular ?? item.razon_social ?? ''
           ).trim();
-          // Extraer CUIT y nombre del formato "CUIT NOMBRE 100.00%"
-          const m = raw.match(/^(\d{10,11})\s+(.+?)(?:\s+\d+[\.,]\d+%.*)?$/);
+          // Múltiples titulares: "CUIT1 NOMBRE1 50.00% - CUIT2 NOMBRE2 50.00%"
+          // Separar por " - " seguido de un CUIT (10-11 dígitos + espacio)
+          const partes = raw.split(/\s*-\s*(?=\d{10,11}\s)/);
+          const titulares = partes
+            .map(parte => {
+              const m = parte.trim().match(/^(\d{10,11})\s+(.+?)(?:\s+\d+[\.,]\d+%.*)?$/);
+              return m ? { cuit: m[1], nombre: m[2].trim() } : null;
+            })
+            .filter((t): t is { cuit: string; nombre: string } => t !== null && t.nombre.length > 0);
+          if (titulares.length === 0) return { titular: raw, titularCuit: undefined };
           return {
-            titular: m ? m[2].trim() : raw,
-            titularCuit: m ? m[1] : undefined,
+            titular: titulares.map(t => t.nombre).join(' / '),
+            titularCuit: titulares[0].cuit,
           };
         })(),
         nroResolucion: String(
