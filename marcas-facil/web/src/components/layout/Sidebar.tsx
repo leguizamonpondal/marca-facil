@@ -36,6 +36,9 @@ const navItems: NavItem[] = [
   { label: 'Servicios legales', to: '/servicios', icon: Scale },
 ];
 
+// Ítem especial CTA "Registrar marca" — aparece destacado después de Panel
+const registrarItem = { label: 'Registrar marca', to: '/registrar', icon: ChevronRight };
+
 interface SidebarProps {
   open: boolean;
   onClose: () => void;
@@ -73,7 +76,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
             <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
               <Scale className="w-4 h-4 text-white" />
             </div>
-            <span className="font-bold text-gray-900 text-lg">MARCA FACIL</span>
+            <span className="font-bold text-gray-900 text-lg">MARCA FÁCIL</span>
           </div>
           <button
             onClick={onClose}
@@ -106,7 +109,38 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         {/* Navigation */}
         <nav className="flex-1 overflow-y-auto py-3 px-2">
           <div className="space-y-0.5">
-            {navItems.map((item) => (
+            {/* Panel */}
+            <NavLink
+              to="/dashboard"
+              onClick={onClose}
+              className={({ isActive }) => clsx(
+                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
+                isActive
+                  ? 'bg-primary-50 text-primary-700'
+                  : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+              )}
+            >
+              <LayoutDashboard className="w-[18px] h-[18px] flex-shrink-0" />
+              Panel
+            </NavLink>
+
+            {/* CTA: Registrar marca */}
+            <NavLink
+              to="/registrar"
+              onClick={onClose}
+              className={({ isActive }) => clsx(
+                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold transition-colors border',
+                isActive
+                  ? 'bg-primary-600 text-white border-primary-600'
+                  : 'bg-primary-50 text-primary-700 border-primary-200 hover:bg-primary-100'
+              )}
+            >
+              <ChevronRight className="w-[18px] h-[18px] flex-shrink-0" />
+              Registrar marca
+            </NavLink>
+
+            {/* Resto de ítems (sin Panel que ya está arriba) */}
+            {navItems.filter(i => i.to !== '/dashboard').map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -118,7 +152,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
                     : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
                 )}
               >
-                <item.icon className="w-4.5 h-4.5 flex-shrink-0 w-[18px] h-[18px]" />
+                <item.icon className="w-[18px] h-[18px] flex-shrink-0" />
                 {item.label}
                 {item.badge && (
                   <span className="ml-auto bg-red-500 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[20px] text-center">
