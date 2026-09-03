@@ -159,7 +159,7 @@ function normalizarRespuestaTMclass(data: any, terminoOriginal: string): Termino
  * GET /api/clasificador/buscar?terminos=ropa,perfumes,calzado
  * Devuelve clasificación por clase Niza para cada término
  */
-router.get('/buscar', authenticateJWT, async (req: Request, res: Response) => {
+router.get('/buscar', authenticate, async (req: Request, res: Response) => {
   const terminosRaw = String(req.query.terminos || '').trim();
   if (!terminosRaw) {
     return res.status(400).json({ error: 'Parámetro "terminos" requerido' });
@@ -218,7 +218,7 @@ router.get('/buscar', authenticateJWT, async (req: Request, res: Response) => {
  * GET /api/clasificador/clases
  * Devuelve el listado completo de las 45 clases Niza con descripción
  */
-router.get('/clases', authenticateJWT, (_req: Request, res: Response) => {
+router.get('/clases', authenticate, (_req: Request, res: Response) => {
   const clases = Object.entries(CLASES_NIZA).map(([num, desc]) => ({
     clase: parseInt(num),
     descripcion: desc,
