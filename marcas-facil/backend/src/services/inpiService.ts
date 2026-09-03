@@ -307,15 +307,15 @@ async function buscarPorPostINPI(
     const jsonBody = {
       Tipo_Resolucion: '',
       Clase: clase > 0 ? String(clase) : '',
-      TipoBusquedaDenominacion: '0',   // 0 = Contiene
+      TipoBusquedaDenominacion: '1',   // 1 = Contiene (0 = Empieza con)
       Denominacion: denominacion,
       Titular: titular,
-      TipoBusquedaTitular: '0',        // 0 = Contiene
+      TipoBusquedaTitular: '1',        // 1 = Contiene (0 = Empieza con)
       Fecha_IngresoDesde: '',
       Fecha_IngresoHasta: '',
       Fecha_ResolucionDesde: '',
       Fecha_ResolucionHasta: '',
-      vigentes: true,   // solo marcas vigentes — equivalente al checkbox "SOLO VIGENTES" del portal INPI
+      vigentes: true,
       limit: 50,
       offset: 0,
     };
@@ -343,6 +343,12 @@ async function buscarPorPostINPI(
       ? data
       : (data?.data ?? data?.marcas ?? data?.rows ?? data?.resultado ?? []);
  
+    // LOG de diagnóstico: keys del primer ítem para mapear campos
+    if (lista.length > 0) {
+      logger.info(`[INPI POST] Keys del primer ítem: ${Object.keys(lista[0]).join(', ')}`);
+      logger.info(`[INPI POST] Primer ítem crudo: ${JSON.stringify(lista[0]).slice(0, 500)}`);
+    }
+ 
     for (const item of lista) {
       const acta = String(item.Acta ?? item.acta ?? item.NumActa ?? item.nro_acta ?? '').replace(/\D/g, '');
       const denom = String(item.Denominacion ?? item.denominacion ?? item.nombre ?? '').trim();
@@ -366,11 +372,18 @@ async function buscarPorPostINPI(
             titularCuit: m ? m[1] : undefined,
           };
         })(),
-        nroResolucion: String(item.NroResolucion ?? item.Nro_Resolucion ?? item.NumResolucion ?? item.nroResolucion ?? '').trim(),
+        nroResolucion: String(
+          item.NroResolucion ?? item.Nro_Resolucion ?? item.NumResolucion ??
+          item.Resolucion ?? item.resolucion ?? item.nroResolucion ??
+          item.nro_resolucion ?? item.NumeroResolucion ?? ''
+        ).trim(),
         estado: String(item.Estado ?? item.estado ?? item.EstadoTramite ?? '').trim(),
-        fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaSolicitud),
+        fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaIngreso ?? item.fechaSolicitud),
         fechaPublicacion: parseDotNetDate(item.FechaPublicacion ?? item.fechaPublicacion),
-        vencimiento: parseDotNetDate(item.Vencimiento ?? item.FechaVencimiento ?? item.fechaVencimiento),
+        vencimiento: parseDotNetDate(
+          item.Vencimiento ?? item.FechaVencimiento ?? item.fechaVencimiento ??
+          item.vencimiento ?? item.Venc ?? item.FechaVenc ?? item.fecha_vencimiento
+        ),
       });
     }
  
