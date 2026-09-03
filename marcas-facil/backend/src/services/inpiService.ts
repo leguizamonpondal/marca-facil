@@ -362,7 +362,7 @@ async function buscarPorPostINPI(
         // Intentamos capturar el campo con distintos nombres posibles
         ...(() => {
           const raw = String(
-            item.TitularesAsignados ?? item.Titulares ?? item.titularesAsignados ??
+            item.Titulares ?? item.TitularesAsignados ?? item.titularesAsignados ??
             item.Titular ?? item.titular ?? item.razon_social ?? ''
           ).trim();
           // Extraer CUIT y nombre del formato "CUIT NOMBRE 100.00%"
@@ -373,16 +373,16 @@ async function buscarPorPostINPI(
           };
         })(),
         nroResolucion: String(
-          item.NroResolucion ?? item.Nro_Resolucion ?? item.NumResolucion ??
-          item.Resolucion ?? item.resolucion ?? item.nroResolucion ??
-          item.nro_resolucion ?? item.NumeroResolucion ?? ''
+          item.Numero_Resolucion ?? item.NroResolucion ?? item.Nro_Resolucion ??
+          item.NumResolucion ?? item.Resolucion ?? item.resolucion ??
+          item.nroResolucion ?? item.nro_resolucion ?? item.NumeroResolucion ?? ''
         ).trim(),
         estado: String(item.Estado ?? item.estado ?? item.EstadoTramite ?? '').trim(),
         fechaSolicitud: parseDotNetDate(item.FechaIngreso ?? item.Fecha_Ingreso ?? item.fechaIngreso ?? item.fechaSolicitud),
         fechaPublicacion: parseDotNetDate(item.FechaPublicacion ?? item.fechaPublicacion),
         vencimiento: parseDotNetDate(
-          item.Vencimiento ?? item.FechaVencimiento ?? item.fechaVencimiento ??
-          item.vencimiento ?? item.Venc ?? item.FechaVenc ?? item.fecha_vencimiento
+          item.Fecha_Vencimiento ?? item.Vencimiento ?? item.FechaVencimiento ??
+          item.fechaVencimiento ?? item.vencimiento ?? item.Venc ?? item.FechaVenc ?? item.fecha_vencimiento
         ),
       });
     }
