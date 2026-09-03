@@ -16,7 +16,7 @@ import { useAuth } from '../hooks/useAuth';
 const API_BASE =
   ((import.meta as any).env?.VITE_API_URL?.replace(/\/$/, '') ?? '') + '/api';
 
-function authHeaders() {
+function authHeaders(): Record<string, string> {
   const token = localStorage.getItem('mf_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
