@@ -18,6 +18,7 @@ const Dominios = lazy(() => import('./pages/Dominios'));
 const Planes = lazy(() => import('./pages/Planes'));
 const Servicios = lazy(() => import('./pages/Servicios'));
 const InpiPortal = lazy(() => import('./pages/InpiPortal'));
+const RegistrarMarca = lazy(() => import('./pages/RegistrarMarca'));
 
 export default function App() {
   return (
@@ -45,6 +46,7 @@ export default function App() {
             {/* Resto */}
             <Route path="alertas" element={<Alertas />} />
             <Route path="boletin" element={<Boletin />} />
+            <Route path="registrar" element={<RegistrarMarca />} />
             <Route path="factibilidad" element={<Factibilidad />} />
             <Route path="dominios" element={<Dominios />} />
             <Route path="planes" element={<Planes />} />
