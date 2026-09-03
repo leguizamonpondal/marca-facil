@@ -16,29 +16,6 @@ import { CLASES_NIZA } from '../types';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const API_BASE = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3001';
 
-async function apiBuscarCuit(cuit: string): Promise<any[]> {
-  const controller = new AbortController();
-  const tid = setTimeout(() => controller.abort(), 60_000);
-  try {
-    const token = localStorage.getItem('mf_token');
-    const res = await fetch(
-      `${API_BASE}/api/factibilidad/buscar-cuit?cuit=${encodeURIComponent(cuit)}`,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        signal: controller.signal,
-      }
-    );
-    if (!res.ok) throw new Error(`Error ${res.status}`);
-    const json = await res.json();
-    return json.marcas ?? json ?? [];
-  } finally {
-    clearTimeout(tid);
-  }
-}
-
 async function apiBuscarTitular(titular: string): Promise<any[]> {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), 60_000);
@@ -127,7 +104,7 @@ function GaugeRegistrabilidad({ pct, recomienda }: { pct: number; recomienda: bo
 }
 
 export default function Factibilidad() {
-  const [modo, setModo] = useState<'denominacion' | 'titular' | 'cuit'>('denominacion');
+  const [modo, setModo] = useState<'denominacion' | 'titular'>('denominacion');
 
   // Modo denominación
   const [denominacion, setDenominacion] = useState('');
@@ -137,10 +114,6 @@ export default function Factibilidad() {
   // Modo titular
   const [titular, setTitular]                   = useState('');
   const [resultadoTitular, setResultadoTitular] = useState<any[] | null>(null);
-
-  // Modo CUIT
-  const [cuit, setCuit]                   = useState('');
-  const [resultadoCuit, setResultadoCuit] = useState<any[] | null>(null);
 
   const { data: historial, isLoading: loadingHistorial } = useQuery({
     queryKey: ['factibilidad-historial'],
@@ -159,15 +132,8 @@ export default function Factibilidad() {
     onError: () => toast.error('Error al buscar por titular. Verificá la conexión con el servidor.'),
   });
 
-  const cuitMutation = useMutation({
-    mutationFn: () => apiBuscarCuit(cuit),
-    onSuccess: (data) => setResultadoCuit(data),
-    onError: () => toast.error('Error al buscar por CUIT. Verificá la conexión con el servidor.'),
-  });
-
   const puedeConsultarDenom    = denominacion.trim().length >= 2;
   const puedeConsultarTitular  = titular.trim().length >= 2;
-  const puedeConsultarCuit     = cuit.replace(/\D/g, '').length >= 10;
 
   return (
     <div className="space-y-5">
@@ -191,22 +157,13 @@ export default function Factibilidad() {
           Por denominación
         </button>
         <button
-          onClick={() => { setModo('titular'); setResultado(null); setResultadoCuit(null); }}
+          onClick={() => { setModo('titular'); setResultado(null); }}
           className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 ${
             modo === 'titular' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
           <Building2 className="w-4 h-4" />
           Por titular
-        </button>
-        <button
-          onClick={() => { setModo('cuit'); setResultado(null); setResultadoTitular(null); }}
-          className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 ${
-            modo === 'cuit' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <Search className="w-4 h-4" />
-          Por CUIT
         </button>
       </div>
 
@@ -322,46 +279,6 @@ export default function Factibilidad() {
         </div>
       )}
 
-      {/* ── FORMULARIO: Búsqueda por CUIT ── */}
-      {modo === 'cuit' && (
-        <div className="card p-6 space-y-4">
-          <h2 className="section-title">Buscar marcas por CUIT del titular</h2>
-          <p className="text-sm text-gray-500">
-            Ingresá el CUIT del titular (con o sin guiones) para ver todas sus marcas registradas en el INPI.
-          </p>
-          <div>
-            <label className="label">CUIT del titular *</label>
-            <input
-              type="text"
-              value={cuit}
-              onChange={(e) => setCuit(e.target.value)}
-              className="input"
-              placeholder="Ej: 20-12345678-9 o 20123456789"
-            />
-          </div>
-          <button
-            onClick={() => cuitMutation.mutate()}
-            disabled={!puedeConsultarCuit || cuitMutation.isPending}
-            className="btn-primary w-full justify-center py-3"
-          >
-            {cuitMutation.isPending ? (
-              <><Spinner size="sm" />Buscando marcas...</>
-            ) : (
-              <><Search className="w-5 h-5" />Buscar por CUIT</>
-            )}
-          </button>
-        </div>
-      )}
-
-      {/* ── RESULTADO: CUIT ── */}
-      {modo === 'cuit' && resultadoCuit !== null && (
-        <ResultadoTitular
-          marcas={resultadoCuit}
-          titular={`CUIT ${cuit}`}
-          onNuevaBusqueda={() => setResultadoCuit(null)}
-        />
-      )}
-
       {/* ── RESULTADO: Denominación ── */}
       {modo === 'denominacion' && resultado && (
         <ResultadoFactibilidad
@@ -425,6 +342,86 @@ function ResultadoTitular({ marcas, titular, onNuevaBusqueda }: {
   titular: string;
   onNuevaBusqueda: () => void;
 }) {
+  const descargarInformeTitular = () => {
+    const fecha = new Date().toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const filas = marcas.map((m: any) => `
+      <tr style="border-bottom:1px solid #e5e7eb">
+        <td style="padding:6px 8px;font-size:11px;color:#6b7280">${m.acta || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;font-weight:600;color:#111">${m.titular || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;color:#374151">${m.titularCuit || '—'}</td>
+        <td style="padding:6px 8px;font-size:12px;font-weight:700;color:#1e3a6e">${m.denominacion || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center">${m.claseNiza ?? m.clase ?? '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;color:#374151">${m.tipoMarca || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;color:#374151">${m.estado || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;color:#6b7280">${m.fechaSolicitud || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;color:#6b7280">${m.vencimiento || '—'}</td>
+        <td style="padding:6px 8px;font-size:11px;color:#6b7280">${m.nroResolucion || '—'}</td>
+      </tr>`).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Marcas por Titular — ${titular}</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:Arial,sans-serif; color:#111; background:#fff; }
+    @media print { body { -webkit-print-color-adjust:exact; print-color-adjust:exact; } .no-print { display:none; } }
+    .header { background:#1e3a6e; color:#fff; padding:20px 36px; }
+    .header h1 { font-size:20px; font-weight:700; }
+    .header p { font-size:11px; color:#93c5fd; margin-top:3px; }
+    .body { padding:28px 36px; }
+    .meta { font-size:12px; color:#374151; margin-bottom:20px; }
+    .meta span { font-weight:700; color:#1e3a6e; }
+    table { width:100%; border-collapse:collapse; }
+    thead tr { background:#f1f5f9; }
+    thead th { padding:9px 8px; text-align:left; font-size:10px; font-weight:700; color:#374151; text-transform:uppercase; letter-spacing:.04em; }
+    .nota { margin-top:24px; padding:10px 14px; background:#f9fafb; border-left:3px solid #d1d5db; font-size:10px; color:#6b7280; line-height:1.6; border-radius:0 6px 6px 0; }
+    .footer { margin-top:24px; padding-top:10px; border-top:1px solid #e5e7eb; font-size:10px; color:#9ca3af; display:flex; justify-content:space-between; }
+    .print-btn { position:fixed; bottom:20px; right:20px; background:#1e3a6e; color:#fff; border:none; border-radius:8px; padding:10px 20px; font-size:13px; font-weight:600; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>MARCA FÁCIL — Marcas Registradas por Titular</h1>
+    <p>Agente de la Propiedad Industrial Mat. N° 1974 — Honorio M. Leguizamón Pondal</p>
+  </div>
+  <div class="body">
+    <div class="meta">
+      Titular buscado: <span>${titular}</span> &nbsp;·&nbsp;
+      Total encontradas: <span>${marcas.length}</span> &nbsp;·&nbsp;
+      Fecha de consulta: <span>${fecha}</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Nro. Acta</th><th>Titular</th><th>CUIT</th><th>Denominación</th>
+        <th style="text-align:center">Cl.</th><th>Tipo</th><th>Estado</th>
+        <th>F. Ingreso</th><th>Venc.</th><th>Nro. Res.</th>
+      </tr></thead>
+      <tbody>${filas}</tbody>
+    </table>
+    <div class="nota">
+      <strong>Nota:</strong> Datos extraídos en tiempo real del registro público del INPI (portaltramites.inpi.gob.ar).
+      Este informe es orientativo. Se recomienda verificar la vigencia de cada marca directamente en el portal del INPI.
+    </div>
+    <div class="footer">
+      <span>MARCA FÁCIL — Sistema de Gestión Marcaria</span>
+      <span>Generado el ${fecha}</span>
+    </div>
+  </div>
+  <button class="print-btn no-print" onclick="window.print()">⬇ Guardar / Imprimir PDF</button>
+</body>
+</html>`;
+
+    const ventana = window.open('', '_blank');
+    if (!ventana) {
+      toast.error('El navegador bloqueó la ventana emergente. Habilitala para descargar el informe.');
+      return;
+    }
+    ventana.document.write(html);
+    ventana.document.close();
+  };
+
   return (
     <div className="space-y-4">
       <div className="card p-4 flex items-center justify-between">
@@ -436,9 +433,17 @@ function ResultadoTitular({ marcas, titular, onNuevaBusqueda }: {
             {marcas.length === 0 ? 'Sin marcas encontradas' : `${marcas.length} marca${marcas.length !== 1 ? 's' : ''} encontrada${marcas.length !== 1 ? 's' : ''}`}
           </p>
         </div>
-        <button onClick={onNuevaBusqueda} className="btn-secondary text-sm">
-          Nueva búsqueda
-        </button>
+        <div className="flex gap-2">
+          {marcas.length > 0 && (
+            <button onClick={descargarInformeTitular} className="btn-primary text-sm">
+              <Download className="w-4 h-4" />
+              Descargar PDF
+            </button>
+          )}
+          <button onClick={onNuevaBusqueda} className="btn-secondary text-sm">
+            Nueva búsqueda
+          </button>
+        </div>
       </div>
 
       {marcas.length === 0 ? (
@@ -476,9 +481,9 @@ function ResultadoTitular({ marcas, titular, onNuevaBusqueda }: {
               <tbody className="divide-y divide-gray-50">
                 {marcas.map((m: any, i: number) => (
                   <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-3 py-2 text-xs text-gray-500">{m.acta || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-700 max-w-[130px] truncate">{m.titular || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-500">{m.titularCuit || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">{m.acta || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-700 min-w-[200px]">{m.titular || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">{m.titularCuit || '—'}</td>
                     <td className="px-3 py-2 text-sm font-semibold text-gray-900">{m.denominacion}</td>
                     <td className="px-3 py-2 text-xs text-center text-gray-600">{m.claseNiza ?? m.clase ?? '—'}</td>
                     <td className="px-3 py-2 text-xs text-gray-500">{m.tipoMarca || '—'}</td>
@@ -906,8 +911,8 @@ function ResultadoFactibilidad({
               <tbody className="divide-y divide-gray-50">
                 {antecedentes.map((a: any, i: number) => (
                   <tr key={i} className={`hover:bg-gray-50 ${a.confundible ? 'bg-red-50/40' : ''}`}>
-                    <td className="px-3 py-2 text-xs text-gray-500">{a.acta || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-700 max-w-[120px] truncate">{a.titular || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">{a.acta || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-700 min-w-[160px]">{a.titular || '—'}</td>
                     <td className="px-3 py-2 text-xs text-gray-500">{a.fechaSolicitud || '—'}</td>
                     <td className="px-3 py-2 text-xs text-center text-gray-600">{a.claseNiza ?? a.clase ?? '—'}</td>
                     <td className="px-3 py-2 text-sm font-semibold text-gray-900">{a.denominacion}</td>
