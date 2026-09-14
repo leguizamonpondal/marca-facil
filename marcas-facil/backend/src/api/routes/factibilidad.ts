@@ -29,7 +29,7 @@ import {
   buscarPorCuitWS,
   consultarDenominacionWS,
   consultarCuitOTitularWS,
-  filtrarVigentes,
+  filtrarObstaculizantes,
   verificarWS,
 } from '../../services/inpiWsService';
 import type { MarcaINPI } from '../../services/inpiService';
@@ -57,32 +57,40 @@ async function consultarConFallback(
 }
 
 /**
- * Arma la respuesta de una búsqueda aplicando —o no— el filtro de vigentes.
+ * Arma la respuesta de una búsqueda por titular o CUIT.
  *
- * Los totales se informan SIEMPRE por separado para que nada quede oculto:
- * el usuario tiene que poder ver cuántos antecedentes se dejaron afuera.
+ * ⚠️ NO se recorta la lista. El Web Service del INPI ya devuelve el mismo
+ * conjunto que el portal con el check "SOLO VIGENTES" tildado —verificado el
+ * 14/09/2026: titular "NIKE" da 202 en ambos, contra 616 sin filtrar—, así que
+ * filtrar de nuevo haría que la app mostrara un número distinto al del portal,
+ * que es la referencia con la que trabaja el profesional.
+ *
+ * Cada resultado viene marcado con `estadoObstaculiza` para resaltarlo en
+ * pantalla. Con ?soloObstaculizantes=true se puede pedir el subconjunto más
+ * estricto de forma explícita.
  */
 function armarRespuestaBusqueda(
   consulta: Record<string, string>,
   marcas: MarcaINPI[],
   fuente: string,
-  soloVigentes: boolean
+  soloObstaculizantes: boolean
 ) {
-  // El scraper viejo no informa estadoVigente; en ese caso no se filtra nada.
-  const tieneEstadoVigente = marcas.some((m) => 'estadoVigente' in m);
-  const vigentes = tieneEstadoVigente
-    ? filtrarVigentes(marcas as Array<MarcaINPI & { estadoVigente: boolean }>)
-    : marcas;
+  // El scraper viejo no informa estadoObstaculiza; en ese caso no se filtra.
+  const clasificadas = marcas.filter((m) => 'estadoObstaculiza' in m) as Array<
+    MarcaINPI & { estadoObstaculiza: boolean }
+  >;
+  const hayClasificacion = clasificadas.length === marcas.length && marcas.length > 0;
 
-  const aplicado = soloVigentes && tieneEstadoVigente;
-  const resultado = aplicado ? vigentes : marcas;
+  const obstaculizantes = hayClasificacion ? filtrarObstaculizantes(clasificadas) : [];
+  const aplicado = soloObstaculizantes && hayClasificacion;
+  const resultado = aplicado ? obstaculizantes : marcas;
 
   return {
     ...consulta,
     total: resultado.length,
     totalSinFiltrar: marcas.length,
-    totalVigentes: tieneEstadoVigente ? vigentes.length : null,
-    filtroVigentesAplicado: aplicado,
+    totalObstaculizantes: hayClasificacion ? obstaculizantes.length : null,
+    filtroAplicado: aplicado,
     fuente,
     marcas: resultado,
   };
@@ -99,20 +107,21 @@ const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
 //   /api/factibilidad/ws-test
 //   /api/factibilidad/ws-test?denominacion=ADIDAS
 //   /api/factibilidad/ws-test?titular=NIKE
+//   /api/factibilidad/ws-test?titular=NIKE&modo=contiene
 //   /api/factibilidad/ws-test?cuit=30500000003
 router.get('/ws-test', async (req: any, res: Response) => {
   const { denominacion, titular, cuit } = req.query as Record<string, string | undefined>;
   const inicio = Date.now();
 
   try {
-    // Desglose por estado, para verificar el filtro "solo vigentes"
-    const resumir = (marcas: Array<{ estado: string; estadoVigente: boolean }>) => {
+    // Desglose por estado, para contrastar contra el portal del INPI
+    const resumir = (marcas: Array<{ estado: string; estadoObstaculiza: boolean }>) => {
       const porEstado: Record<string, number> = {};
       for (const m of marcas) porEstado[m.estado] = (porEstado[m.estado] || 0) + 1;
       return {
         total: marcas.length,
-        vigentes: marcas.filter((m) => m.estadoVigente).length,
-        noVigentes: marcas.filter((m) => !m.estadoVigente).length,
+        obstaculizan: marcas.filter((m) => m.estadoObstaculiza).length,
+        noObstaculizan: marcas.filter((m) => !m.estadoObstaculiza).length,
         porEstado,
       };
     };
@@ -129,13 +138,15 @@ router.get('/ws-test', async (req: any, res: Response) => {
     }
 
     if (titular || cuit) {
+      const modo = String((req.query as any).modo || '') === 'contiene' ? 'contiene' : 'empieza';
       const marcas = await consultarCuitOTitularWS({
         titular: titular ? String(titular) : undefined,
         cuit: cuit ? String(cuit) : undefined,
+        modo,
       });
       return res.json({
         operacion: 'ConsultaCuitOTitular',
-        consulta: { titular: titular || null, cuit: cuit || null },
+        consulta: { titular: titular || null, cuit: cuit || null, modo },
         latenciaMs: Date.now() - inicio,
         ...resumir(marcas),
         muestra: marcas.slice(0, 5),
@@ -543,18 +554,22 @@ router.get('/buscar-titular', async (req: AuthRequest, res: Response, next: Next
   try {
     const titular = String(req.query.titular || '').trim();
     if (titular.length < 2) throw new AppError(400, 'El nombre del titular debe tener al menos 2 caracteres', 'INVALID_PARAM');
-    // Por defecto se devuelven solo las VIGENTES (concedidas + en trámite),
-    // igual que el check "SOLO VIGENTES" del portal del INPI. Con
-    // ?soloVigentes=false se obtiene el listado completo.
-    const soloVigentes = String(req.query.soloVigentes ?? 'true') !== 'false';
+    // Opt-in: por defecto se devuelve todo lo que manda el INPI, que ya viene
+    // filtrado igual que el portal. Ver nota en armarRespuestaBusqueda.
+    const soloObstaculizantes = String(req.query.soloObstaculizantes ?? 'false') === 'true';
 
-    logger.info(`[Factibilidad] Búsqueda por titular: "${titular}" (soloVigentes=${soloVigentes}) — Usuario ${req.user!.id}`);
+    // ?modo=contiene busca el texto en cualquier parte del nombre del titular
+    // ("COMERCIAL NIKE SRL" aparece buscando "NIKE"). Por defecto 'empieza',
+    // que es el comportamiento nativo del WS. Ver prepararTitular().
+    const modo = String(req.query.modo || '') === 'contiene' ? 'contiene' : 'empieza';
+
+    logger.info(`[Factibilidad] Búsqueda por titular: "${titular}" [${modo}] — Usuario ${req.user!.id}`);
     const { marcas, fuente } = await consultarConFallback(
       'buscar-titular',
-      () => buscarPorTitularWS(titular),
+      () => buscarPorTitularWS(titular, modo),
       () => buscarPorTitularINPI(titular)
     );
-    res.json(armarRespuestaBusqueda({ titular }, marcas, fuente, soloVigentes));
+    res.json(armarRespuestaBusqueda({ titular, modo }, marcas, fuente, soloObstaculizantes));
   } catch (err) { next(err); }
 });
 
@@ -563,15 +578,15 @@ router.get('/buscar-cuit', async (req: AuthRequest, res: Response, next: NextFun
   try {
     const cuit = String(req.query.cuit || '').replace(/\D/g, '').trim();
     if (cuit.length < 10) throw new AppError(400, 'El CUIT debe tener al menos 10 dígitos', 'INVALID_PARAM');
-    const soloVigentes = String(req.query.soloVigentes ?? 'true') !== 'false';
+    const soloObstaculizantes = String(req.query.soloObstaculizantes ?? 'false') === 'true';
 
-    logger.info(`[Factibilidad] Búsqueda por CUIT: "${cuit}" (soloVigentes=${soloVigentes}) — Usuario ${req.user!.id}`);
+    logger.info(`[Factibilidad] Búsqueda por CUIT: "${cuit}" — Usuario ${req.user!.id}`);
     const { marcas, fuente } = await consultarConFallback(
       'buscar-cuit',
       () => buscarPorCuitWS(cuit),
       () => buscarPorCuitINPI(cuit)
     );
-    res.json(armarRespuestaBusqueda({ cuit }, marcas, fuente, soloVigentes));
+    res.json(armarRespuestaBusqueda({ cuit }, marcas, fuente, soloObstaculizantes));
   } catch (err) { next(err); }
 });
 
