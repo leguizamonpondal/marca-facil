@@ -29,6 +29,7 @@ import {
   buscarPorCuitWS,
   consultarDenominacionWS,
   consultarCuitOTitularWS,
+  filtrarVigentes,
   verificarWS,
 } from '../../services/inpiWsService';
 import type { MarcaINPI } from '../../services/inpiService';
@@ -55,6 +56,38 @@ async function consultarConFallback(
   }
 }
 
+/**
+ * Arma la respuesta de una búsqueda aplicando —o no— el filtro de vigentes.
+ *
+ * Los totales se informan SIEMPRE por separado para que nada quede oculto:
+ * el usuario tiene que poder ver cuántos antecedentes se dejaron afuera.
+ */
+function armarRespuestaBusqueda(
+  consulta: Record<string, string>,
+  marcas: MarcaINPI[],
+  fuente: string,
+  soloVigentes: boolean
+) {
+  // El scraper viejo no informa estadoVigente; en ese caso no se filtra nada.
+  const tieneEstadoVigente = marcas.some((m) => 'estadoVigente' in m);
+  const vigentes = tieneEstadoVigente
+    ? filtrarVigentes(marcas as Array<MarcaINPI & { estadoVigente: boolean }>)
+    : marcas;
+
+  const aplicado = soloVigentes && tieneEstadoVigente;
+  const resultado = aplicado ? vigentes : marcas;
+
+  return {
+    ...consulta,
+    total: resultado.length,
+    totalSinFiltrar: marcas.length,
+    totalVigentes: tieneEstadoVigente ? vigentes.length : null,
+    filtroVigentesAplicado: aplicado,
+    fuente,
+    marcas: resultado,
+  };
+}
+
 const router = Router();
 
 const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
@@ -72,13 +105,25 @@ router.get('/ws-test', async (req: any, res: Response) => {
   const inicio = Date.now();
 
   try {
+    // Desglose por estado, para verificar el filtro "solo vigentes"
+    const resumir = (marcas: Array<{ estado: string; estadoVigente: boolean }>) => {
+      const porEstado: Record<string, number> = {};
+      for (const m of marcas) porEstado[m.estado] = (porEstado[m.estado] || 0) + 1;
+      return {
+        total: marcas.length,
+        vigentes: marcas.filter((m) => m.estadoVigente).length,
+        noVigentes: marcas.filter((m) => !m.estadoVigente).length,
+        porEstado,
+      };
+    };
+
     if (denominacion) {
       const marcas = await consultarDenominacionWS(String(denominacion));
       return res.json({
         operacion: 'ConsultaDenominacion',
         consulta: denominacion,
-        total: marcas.length,
         latenciaMs: Date.now() - inicio,
+        ...resumir(marcas),
         muestra: marcas.slice(0, 5),
       });
     }
@@ -91,8 +136,8 @@ router.get('/ws-test', async (req: any, res: Response) => {
       return res.json({
         operacion: 'ConsultaCuitOTitular',
         consulta: { titular: titular || null, cuit: cuit || null },
-        total: marcas.length,
         latenciaMs: Date.now() - inicio,
+        ...resumir(marcas),
         muestra: marcas.slice(0, 5),
       });
     }
@@ -498,13 +543,18 @@ router.get('/buscar-titular', async (req: AuthRequest, res: Response, next: Next
   try {
     const titular = String(req.query.titular || '').trim();
     if (titular.length < 2) throw new AppError(400, 'El nombre del titular debe tener al menos 2 caracteres', 'INVALID_PARAM');
-    logger.info(`[Factibilidad] Búsqueda por titular: "${titular}" — Usuario ${req.user!.id}`);
+    // Por defecto se devuelven solo las VIGENTES (concedidas + en trámite),
+    // igual que el check "SOLO VIGENTES" del portal del INPI. Con
+    // ?soloVigentes=false se obtiene el listado completo.
+    const soloVigentes = String(req.query.soloVigentes ?? 'true') !== 'false';
+
+    logger.info(`[Factibilidad] Búsqueda por titular: "${titular}" (soloVigentes=${soloVigentes}) — Usuario ${req.user!.id}`);
     const { marcas, fuente } = await consultarConFallback(
       'buscar-titular',
       () => buscarPorTitularWS(titular),
       () => buscarPorTitularINPI(titular)
     );
-    res.json({ titular, total: marcas.length, marcas, fuente });
+    res.json(armarRespuestaBusqueda({ titular }, marcas, fuente, soloVigentes));
   } catch (err) { next(err); }
 });
 
@@ -513,13 +563,15 @@ router.get('/buscar-cuit', async (req: AuthRequest, res: Response, next: NextFun
   try {
     const cuit = String(req.query.cuit || '').replace(/\D/g, '').trim();
     if (cuit.length < 10) throw new AppError(400, 'El CUIT debe tener al menos 10 dígitos', 'INVALID_PARAM');
-    logger.info(`[Factibilidad] Búsqueda por CUIT: "${cuit}" — Usuario ${req.user!.id}`);
+    const soloVigentes = String(req.query.soloVigentes ?? 'true') !== 'false';
+
+    logger.info(`[Factibilidad] Búsqueda por CUIT: "${cuit}" (soloVigentes=${soloVigentes}) — Usuario ${req.user!.id}`);
     const { marcas, fuente } = await consultarConFallback(
       'buscar-cuit',
       () => buscarPorCuitWS(cuit),
       () => buscarPorCuitINPI(cuit)
     );
-    res.json({ cuit, total: marcas.length, marcas, fuente });
+    res.json(armarRespuestaBusqueda({ cuit }, marcas, fuente, soloVigentes));
   } catch (err) { next(err); }
 });
 
