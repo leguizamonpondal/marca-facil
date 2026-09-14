@@ -83,30 +83,41 @@ function soloFecha(valor: string): string | undefined {
 // ── Estados de marca ──────────────────────────────────────────────────────────
 /**
  * El campo `Estado` del INPI es inconsistente: a veces viene como código de una
- * letra ("C", "N"), a veces con la palabra completa ("Denegada", "Abandonada"),
- * y en trámite viene vacío o con un guion.
+ * letra ("C" = concedida, "N" = denegada), a veces con la palabra completa
+ * ("Abandonada", "Caduca"), y en trámite viene vacío o con un guion.
  *
- * `vigente` indica si la marca constituye un antecedente oponible, es decir, si
- * debe pesar en el análisis de confundibilidad del estudio de factibilidad.
+ * ⚠️ OJO CON LA PALABRA "VIGENTE" — significa dos cosas distintas:
+ *
+ *   1. La "vigencia" del INPI: el check SOLO VIGENTES del portal, que combina
+ *      estado Y vencimiento. El Web Service YA aplica ese filtro por su cuenta
+ *      (verificado 14/09/2026: titular "NIKE" da 202 tanto en el WS como en el
+ *      portal con el check tildado, contra 616 sin filtrar).
+ *
+ *   2. `obstaculiza` (este campo): si el antecedente debe pesar en el análisis
+ *      de confundibilidad. Es una clasificación NUESTRA, no del INPI.
+ *
+ * Las dos no coinciden siempre: el portal incluye entre sus "vigentes" alguna
+ * marca denegada. Por eso este campo sirve para MARCAR cada resultado en
+ * pantalla, pero no para recortar la lista (ver nota en filtrarObstaculizantes).
  */
 export interface EstadoMarca {
-  crudo: string;      // valor original devuelto por el INPI
-  etiqueta: string;   // texto legible para mostrar al usuario
-  vigente: boolean;   // true = antecedente que puede obstaculizar el registro
+  crudo: string;         // valor original devuelto por el INPI
+  etiqueta: string;      // texto legible para mostrar al usuario
+  obstaculiza: boolean;  // true = puede obstaculizar un nuevo registro
 }
 
-const TABLA_ESTADOS: Record<string, { etiqueta: string; vigente: boolean }> = {
-  C:          { etiqueta: 'Concedida',  vigente: true },
-  CONCEDIDA:  { etiqueta: 'Concedida',  vigente: true },
-  REGISTRADA: { etiqueta: 'Concedida',  vigente: true },
-  N:          { etiqueta: 'Nula',       vigente: false },
-  NULA:       { etiqueta: 'Nula',       vigente: false },
-  DENEGADA:   { etiqueta: 'Denegada',   vigente: false },
-  RECHAZADA:  { etiqueta: 'Denegada',   vigente: false },
-  ABANDONADA: { etiqueta: 'Abandonada', vigente: false },
-  CADUCA:     { etiqueta: 'Caduca',     vigente: false },
-  CADUCADA:   { etiqueta: 'Caduca',     vigente: false },
-  DESISTIDA:  { etiqueta: 'Desistida',  vigente: false },
+const TABLA_ESTADOS: Record<string, { etiqueta: string; obstaculiza: boolean }> = {
+  C:          { etiqueta: 'Concedida',  obstaculiza: true },
+  CONCEDIDA:  { etiqueta: 'Concedida',  obstaculiza: true },
+  REGISTRADA: { etiqueta: 'Concedida',  obstaculiza: true },
+  N:          { etiqueta: 'Denegada',   obstaculiza: false },
+  DENEGADA:   { etiqueta: 'Denegada',   obstaculiza: false },
+  RECHAZADA:  { etiqueta: 'Denegada',   obstaculiza: false },
+  NULA:       { etiqueta: 'Nula',       obstaculiza: false },
+  ABANDONADA: { etiqueta: 'Abandonada', obstaculiza: false },
+  CADUCA:     { etiqueta: 'Caduca',     obstaculiza: false },
+  CADUCADA:   { etiqueta: 'Caduca',     obstaculiza: false },
+  DESISTIDA:  { etiqueta: 'Desistida',  obstaculiza: false },
 };
 
 export function normalizarEstado(crudo: string): EstadoMarca {
@@ -114,7 +125,7 @@ export function normalizarEstado(crudo: string): EstadoMarca {
 
   // Vacío o guion = en trámite (así lo muestra el portal del INPI)
   if (!original || /^-+$/.test(original)) {
-    return { crudo: original, etiqueta: 'En trámite', vigente: true };
+    return { crudo: original, etiqueta: 'En trámite', obstaculiza: true };
   }
 
   const clave = original
@@ -124,14 +135,14 @@ export function normalizarEstado(crudo: string): EstadoMarca {
     .replace(/[^A-Z]/g, '');
   const conocido = TABLA_ESTADOS[clave];
   if (conocido) {
-    return { crudo: original, etiqueta: conocido.etiqueta, vigente: conocido.vigente };
+    return { crudo: original, etiqueta: conocido.etiqueta, obstaculiza: conocido.obstaculiza };
   }
 
   // Estado desconocido: se muestra tal cual y se asume VIGENTE a propósito.
   // En un análisis de factibilidad es preferible señalar de más que descartar
   // por error un antecedente que sí obstaculiza.
-  logger.warn(`[INPI-WS] Estado desconocido: "${original}" — se asume vigente`);
-  return { crudo: original, etiqueta: original, vigente: true };
+  logger.warn(`[INPI-WS] Estado desconocido: "${original}" — se asume que obstaculiza`);
+  return { crudo: original, etiqueta: original, obstaculiza: true };
 }
 
 // ── Titulares ─────────────────────────────────────────────────────────────────
@@ -236,8 +247,8 @@ async function llamarSoap(operacion: string, cuerpoInterno: string): Promise<str
 export interface MarcaINPIWS extends MarcaINPI {
   /** Valor original del INPI ("C", "N", "-", "Denegada"...) */
   estadoCrudo: string;
-  /** true si la marca es un antecedente que puede obstaculizar el registro */
-  estadoVigente: boolean;
+  /** true si el estado indica un antecedente que puede obstaculizar el registro */
+  estadoObstaculiza: boolean;
   /** Titulares separados, con su porcentaje */
   titulares: TitularMarca[];
 }
@@ -273,7 +284,7 @@ function parsearGrillaMarcas(xml: string, operacion: string): MarcaINPIWS[] {
       nroResolucion: sinDato(textoDe(fila, 'Numero_Resolucion')),
       estado: estado.etiqueta,
       estadoCrudo: estado.crudo,
-      estadoVigente: estado.vigente,
+      estadoObstaculiza: estado.obstaculiza,
       titulares: parsearTitulares(titularCrudo),
       fechaSolicitud: soloFecha(textoDe(fila, 'Fecha_Ingreso')),
     } as MarcaINPIWS;
@@ -304,12 +315,46 @@ export async function consultarDenominacionWS(denominacion: string): Promise<Mar
  * (así lo muestra el ejemplo oficial del INPI — omitirlo puede dar error
  * de referencia nula del lado del servicio).
  */
+/**
+ * Modo de coincidencia del nombre del titular, equivalente al desplegable
+ * del buscador del portal del INPI.
+ */
+export type ModoBusquedaTitular = 'empieza' | 'contiene';
+
+/**
+ * ⚠️ COMPORTAMIENTO NO DOCUMENTADO POR EL INPI
+ *
+ * El WS hace, de fábrica, una búsqueda de tipo "EMPIEZA CON": buscar
+ * "INNOVATE" no encuentra "NIKE INNOVATE C.V".
+ *
+ * Verificado el 14/09/2026 que el servicio interpola el texto en una consulta
+ * SQL LIKE, de modo que anteponer "%" activa el modo "CONTIENE":
+ *   titular="INNOVATE"   →   0 resultados
+ *   titular="%INNOVATE"  → 196 resultados
+ *
+ * Esto NO está documentado, así que puede dejar de funcionar sin aviso. Por eso
+ * el modo por defecto es 'empieza' (el nativo): si el INPI cambiara la
+ * implementación, se degrada a menos resultados en vez de romperse. Está
+ * pendiente pedirle al INPI que confirme si hay un modo oficial.
+ */
+function prepararTitular(titular: string, modo: ModoBusquedaTitular): string {
+  // Se quitan los comodines que venga escribiendo el usuario: si alguien busca
+  // "50% OFF SA", ese % no debe interpretarse como comodín.
+  const limpio = titular.replace(/[%_]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (limpio !== titular.trim()) {
+    logger.warn(`[INPI-WS] Se quitaron comodines del titular: "${titular}" → "${limpio}"`);
+  }
+  return modo === 'contiene' && limpio ? `%${limpio}` : limpio;
+}
+
 export async function consultarCuitOTitularWS(params: {
   cuit?: string;
   titular?: string;
+  modo?: ModoBusquedaTitular;
 }): Promise<MarcaINPIWS[]> {
   const cuit = (params.cuit || '').replace(/[^\d]/g, '');
-  const titular = (params.titular || '').trim();
+  const modo: ModoBusquedaTitular = params.modo === 'contiene' ? 'contiene' : 'empieza';
+  const titular = prepararTitular(params.titular || '', modo);
 
   if (!cuit && !titular) return [];
 
@@ -318,26 +363,31 @@ export async function consultarCuitOTitularWS(params: {
     `<tem:cuit>${escaparXml(cuit)}</tem:cuit>` +
       `<tem:titular>${escaparXml(titular)}</tem:titular>`
   );
-  return parsearGrillaMarcas(xml, 'ConsultaCuitOTitular');
+  return parsearGrillaMarcas(xml, `ConsultaCuitOTitular[${modo}]`);
 }
 
 /**
- * Filtra dejando solo los antecedentes vigentes: CONCEDIDAS y EN TRÁMITE.
+ * Deja solo los antecedentes que pueden obstaculizar un nuevo registro.
  *
- * Equivale al check "SOLO VIGENTES" del buscador del portal del INPI, que es
- * el criterio que se usa en una búsqueda de antecedentes: son las únicas que
- * realmente pueden obstaculizar un nuevo registro.
+ * ⚠️ NO se aplica por defecto, a propósito. El Web Service ya devuelve el mismo
+ * conjunto que el portal del INPI con el check "SOLO VIGENTES" tildado
+ * (verificado: titular "NIKE" → 202 en ambos, contra 616 sin filtrar).
  *
- * El Web Service NO expone ese filtro (el request solo acepta la denominación
- * o el titular), así que se aplica del lado de la app.
+ * Filtrar de nuevo acá haría que la app mostrara un número distinto al del
+ * portal, que es la referencia con la que trabaja el profesional. Queda
+ * disponible para quien quiera un criterio más estricto, pero la lista se
+ * devuelve completa y cada resultado se marca con `estadoObstaculiza`.
  */
-export function filtrarVigentes<T extends { estadoVigente: boolean }>(marcas: T[]): T[] {
-  return marcas.filter((m) => m.estadoVigente);
+export function filtrarObstaculizantes<T extends { estadoObstaculiza: boolean }>(marcas: T[]): T[] {
+  return marcas.filter((m) => m.estadoObstaculiza);
 }
 
-/** Atajo por titular. */
-export async function buscarPorTitularWS(titular: string): Promise<MarcaINPIWS[]> {
-  return consultarCuitOTitularWS({ titular });
+/** Atajo por titular. `modo` por defecto: 'empieza' (ver prepararTitular). */
+export async function buscarPorTitularWS(
+  titular: string,
+  modo: ModoBusquedaTitular = 'empieza'
+): Promise<MarcaINPIWS[]> {
+  return consultarCuitOTitularWS({ titular, modo });
 }
 
 /** Atajo por CUIT. */
