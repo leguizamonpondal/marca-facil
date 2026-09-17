@@ -22,6 +22,7 @@ import resellersRoutes from './api/routes/resellers';
 import factibilidadRoutes from './api/routes/factibilidad';
 import inpiRoutes from './api/routes/inpi';
 import clasificadorRoutes from './api/routes/clasificador';
+import presentacionRoutes from './api/routes/presentacion';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -82,9 +83,15 @@ app.use('/api/resellers', resellersRoutes);
 app.use('/api/factibilidad', factibilidadRoutes);
 app.use('/api/inpi', inpiRoutes);
 app.use('/api/clasificador', clasificadorRoutes);
+app.use('/api/presentacion', presentacionRoutes);
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-app.listen(PORT,
+app.listen(PORT, () => {
+  logger.info(`🚀 MARCA FÁCIL backend corriendo en puerto ${PORT}`);
+  logger.info(`   Ambiente: ${process.env.NODE_ENV || 'development'}`);
+});
+
+export default app;
