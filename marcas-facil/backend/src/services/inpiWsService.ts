@@ -316,45 +316,44 @@ export async function consultarDenominacionWS(denominacion: string): Promise<Mar
  * de referencia nula del lado del servicio).
  */
 /**
- * Modo de coincidencia del nombre del titular, equivalente al desplegable
- * del buscador del portal del INPI.
+ * ⚠️ EL WEB SERVICE SOLO HACE "EMPIEZA CON". NO TIENE MODO "CONTIENE".
+ *
+ * `ConsultaCuitOTitular` busca de fábrica por prefijo: "INNOVATE" no encuentra
+ * "NIKE INNOVATE C.V".
+ *
+ * El 14/09/2026 se detectó que anteponer "%" al titular activaba una búsqueda
+ * parcial (196 resultados contra 0). El INPI lo desautorizó expresamente por
+ * correo el 15/09/2026:
+ *
+ *   "No es oficial ni está soportado. Es un efecto colateral de base de datos
+ *    del buscador subyacente, no expuesto por la API. No debe usarse en
+ *    desarrollos productivos: puede dejar de funcionar sin aviso ante
+ *    cualquier actualización."
+ *
+ * El riesgo no es que rompa: es que **degrade en silencio**. Una búsqueda de
+ * antecedentes pasaría de 240 a 202 resultados sin error visible, y se firmaría
+ * un estudio de factibilidad con 38 marcas faltantes.
+ *
+ * 🚫 NO REINTRODUCIR EL "%". Para búsqueda parcial de titular existe un camino
+ * oficial: el portal expone "CONTIENE" en su desplegable, y el scraper lo usa
+ * con `TipoBusquedaTitular: '1'` (ver `buscarPorTitularINPI` en inpiService.ts).
  */
-export type ModoBusquedaTitular = 'empieza' | 'contiene';
-
-/**
- * ⚠️ COMPORTAMIENTO NO DOCUMENTADO POR EL INPI
- *
- * El WS hace, de fábrica, una búsqueda de tipo "EMPIEZA CON": buscar
- * "INNOVATE" no encuentra "NIKE INNOVATE C.V".
- *
- * Verificado el 14/09/2026 que el servicio interpola el texto en una consulta
- * SQL LIKE, de modo que anteponer "%" activa el modo "CONTIENE":
- *   titular="INNOVATE"   →   0 resultados
- *   titular="%INNOVATE"  → 196 resultados
- *
- * Esto NO está documentado, así que puede dejar de funcionar sin aviso. Por eso
- * el modo por defecto es 'empieza' (el nativo): si el INPI cambiara la
- * implementación, se degrada a menos resultados en vez de romperse. Está
- * pendiente pedirle al INPI que confirme si hay un modo oficial.
- */
-function prepararTitular(titular: string, modo: ModoBusquedaTitular): string {
+function prepararTitular(titular: string): string {
   // Se quitan los comodines que venga escribiendo el usuario: si alguien busca
-  // "50% OFF SA", ese % no debe interpretarse como comodín.
+  // "50% OFF SA", ese % no debe llegar al servicio.
   const limpio = titular.replace(/[%_]/g, ' ').replace(/\s+/g, ' ').trim();
   if (limpio !== titular.trim()) {
     logger.warn(`[INPI-WS] Se quitaron comodines del titular: "${titular}" → "${limpio}"`);
   }
-  return modo === 'contiene' && limpio ? `%${limpio}` : limpio;
+  return limpio;
 }
 
 export async function consultarCuitOTitularWS(params: {
   cuit?: string;
   titular?: string;
-  modo?: ModoBusquedaTitular;
 }): Promise<MarcaINPIWS[]> {
   const cuit = (params.cuit || '').replace(/[^\d]/g, '');
-  const modo: ModoBusquedaTitular = params.modo === 'contiene' ? 'contiene' : 'empieza';
-  const titular = prepararTitular(params.titular || '', modo);
+  const titular = prepararTitular(params.titular || '');
 
   if (!cuit && !titular) return [];
 
@@ -363,7 +362,7 @@ export async function consultarCuitOTitularWS(params: {
     `<tem:cuit>${escaparXml(cuit)}</tem:cuit>` +
       `<tem:titular>${escaparXml(titular)}</tem:titular>`
   );
-  return parsearGrillaMarcas(xml, `ConsultaCuitOTitular[${modo}]`);
+  return parsearGrillaMarcas(xml, 'ConsultaCuitOTitular[empieza]');
 }
 
 /**
@@ -382,17 +381,281 @@ export function filtrarObstaculizantes<T extends { estadoObstaculiza: boolean }>
   return marcas.filter((m) => m.estadoObstaculiza);
 }
 
-/** Atajo por titular. `modo` por defecto: 'empieza' (ver prepararTitular). */
-export async function buscarPorTitularWS(
-  titular: string,
-  modo: ModoBusquedaTitular = 'empieza'
-): Promise<MarcaINPIWS[]> {
-  return consultarCuitOTitularWS({ titular, modo });
+/**
+ * Atajo por titular. **Siempre "empieza con"** — el WS no soporta otra cosa.
+ * Para búsqueda parcial usar el scraper del portal (ver nota en prepararTitular).
+ */
+export async function buscarPorTitularWS(titular: string): Promise<MarcaINPIWS[]> {
+  return consultarCuitOTitularWS({ titular });
 }
 
 /** Atajo por CUIT. */
 export async function buscarPorCuitWS(cuit: string): Promise<MarcaINPIWS[]> {
   return consultarCuitOTitularWS({ cuit });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INGRESO DE TRÁMITES — Ingresar_MarcasNuevas (trámite 1)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// ⚠️ Esta operación SOLO CARGA el trámite. NO lo firma ni lo paga.
+// Queda en "Mis Trámites" del portal, sin validez legal y sin generar arancel,
+// hasta que un titular o representante lo firme con su Clave Fiscal y se pague
+// el VEP (confirmado por el INPI, 15/09/2026).
+//
+// 📋 Códigos: tomados del Excel oficial de equivalencias del INPI.
+
+/** `Id_Tipo_Domicilio` — 1 = Real · 2 = Legal. El INPI pide los dos por titular. */
+export type TipoDomicilioINPI = 1 | 2;
+
+/** `Id_Titular_Tipo` — 1 = Física · 2 = Jurídica · 3 = Extranjero · 4 = Pyme */
+export type TipoTitularINPI = 1 | 2 | 3 | 4;
+
+export interface DomicilioWS {
+  tipo: TipoDomicilioINPI;
+  idPais?: number;        // 9 = ARGENTINA
+  idProvincia?: number;   // 1 = CABA · 24 = Buenos Aires
+  localidad: string;
+  domicilio: string;
+  numero: string | number;
+  codPostal?: string;
+}
+
+export interface TitularWS {
+  nomApe: string;
+  porcentaje: number;
+  cuit: string;
+  email: string;
+  idTitularTipo: TipoTitularINPI;
+  /** `ID_Genero` — 1 = Masculino · 2 = Femenino · 3 = Otro. 0 en personas jurídicas. */
+  genero?: 0 | 1 | 2 | 3;
+  /** `Id_Documento` — 1 = DNI · 2 = CL · 3 = LE · 4 = LC. Solo persona física. */
+  tipoDni?: 1 | 2 | 3 | 4;
+  numDni?: string;
+  /** `Id_EstadoCivil` — 1 = Soltero/a · 2 = Casado/a · 3 = Viudo/a · 4 = Divorciado/a */
+  estadoCivil?: 1 | 2 | 3 | 4;
+  /** Presente en el ejemplo oficial con valor 1; el manual no lo documenta. */
+  tipo?: number;
+  domicilios: DomicilioWS[];
+}
+
+/**
+ * Nodo `Solicitantes` — quién presenta, cuando NO es el titular.
+ *
+ * El manual: *"Se valida en marcas cuando el CUIT del titular difiere del
+ * usuario."* Es exactamente el caso de MARCA FÁCIL: Honorio carga con sus
+ * credenciales y el titular es el cliente.
+ *
+ * ⚠️ El ejemplo oficial del INPI **esquiva este caso a propósito** ("el usuario
+ * que ingresa coincide con el primer titular para no requerir Solicitantes"),
+ * así que no hay ejemplo oficial de esta combinación. De ahí la prueba real.
+ */
+export interface SolicitanteWS {
+  /** "A" = agente · "P" = particular */
+  tipoPersona: 'A' | 'P';
+  poderInscriptivo: 'SI' | 'NO';
+  aceptaFacultades: boolean;
+  email: string;
+  nombre?: string;          // obligatorio si tipoPersona = "P"
+  cuit?: string;            // obligatorio si tipoPersona = "P"
+  nroSolicitante?: number;  // obligatorio si tipoPersona = "A" — nro de agente
+  nroPoder?: string;        // obligatorio si poderInscriptivo = "SI"
+  fecha?: string;           // idem — YYYY-MM-DD
+}
+
+/**
+ * Nodo `Documentacion` — `idIndice` según el Excel, solapa DOCUMENTACION,
+ * fila "MarcasNuevas":
+ *   3 = Acompaña Documento de Prioridad
+ *   6 = Acompaña Poder            ← acá va el poder especial firmado
+ *  20 = Otros
+ *  24 = Ratifica Gestión
+ * 1199 = Reglamento Uso Marca Colectiva
+ * 1205 = Archivos Descriptivos para Marcas no Tradicionales
+ * 1359 = Certificado PYME
+ */
+export interface DocumentoWS {
+  idIndice: number;
+  /** Contenido del archivo en base64, sin el prefijo `data:`. */
+  documentoBase64: string;
+}
+
+export interface MarcaNuevaWS {
+  denominacion: string;
+  clase: number;
+  /** `Cod_TipoMarca` — 1 = Denominativa · 2 = Figurativa · 3 = Mixta. Default 1. */
+  tipoMarca?: number;
+  /** Productos/servicios que se reivindican. */
+  observacionesProteccion?: string;
+  titulares: TitularWS[];
+  solicitantes?: SolicitanteWS[];
+  documentacion?: DocumentoWS[];
+}
+
+export interface RespuestaIngresoWS {
+  ok: boolean;
+  /** Identificador de gestión. Es el número con el que el trámite aparece en
+   *  "Mis Trámites" para firmarse. `null` si la respuesta no trae `orden:`. */
+  orden: number | null;
+  /** Mensaje legible: "OK" o los errores de validación concatenados. */
+  mensaje: string;
+  /** El string tal como lo devolvió el INPI, para logs y diagnóstico. */
+  crudo: string;
+}
+
+/**
+ * Parsea la respuesta de cualquier `Ingresar_*`.
+ *
+ * Formato confirmado por el INPI (15/09/2026):
+ *   éxito  → "OK, orden:N"   (N = identificador de gestión)
+ *   error  → "<mensajes de validación concatenados>, orden:-1"
+ *
+ * No hay catálogo de códigos: los errores son descripciones legibles de las
+ * reglas de negocio (CUIT inválido, porcentajes ≠ 100%, adjuntos faltantes).
+ * Por eso el mensaje se puede mostrar al usuario tal cual.
+ */
+export function parsearRespuestaIngreso(crudo: string): RespuestaIngresoWS {
+  const texto = (crudo || '').trim();
+  const m = texto.match(/orden\s*:\s*(-?\d+)/i);
+  const orden = m ? parseInt(m[1], 10) : null;
+
+  // El mensaje es todo lo que precede a ", orden:N"
+  const mensaje = (m ? texto.slice(0, m.index).replace(/,\s*$/, '') : texto).trim() || texto;
+
+  return {
+    ok: orden !== null && orden > 0,
+    orden: orden !== null && orden > 0 ? orden : orden,
+    mensaje,
+    crudo: texto,
+  };
+}
+
+function xmlDomicilio(d: DomicilioWS): string {
+  return (
+    `<tem:Domicilios>` +
+    `<tem:Id_Tipo_Domicilio>${d.tipo}</tem:Id_Tipo_Domicilio>` +
+    `<tem:Id_Pais>${d.idPais ?? 9}</tem:Id_Pais>` +
+    `<tem:idProvincia>${d.idProvincia ?? 1}</tem:idProvincia>` +
+    `<tem:Localidad>${escaparXml(d.localidad)}</tem:Localidad>` +
+    `<tem:Domicilio>${escaparXml(d.domicilio)}</tem:Domicilio>` +
+    `<tem:Numero>${escaparXml(d.numero)}</tem:Numero>` +
+    (d.codPostal ? `<tem:Cod_Postal>${escaparXml(d.codPostal)}</tem:Cod_Postal>` : '') +
+    `</tem:Domicilios>`
+  );
+}
+
+function xmlTitular(t: TitularWS): string {
+  const esFisica = t.idTitularTipo === 1;
+  return (
+    `<tem:Titulares>` +
+    `<tem:NomApe>${escaparXml(t.nomApe)}</tem:NomApe>` +
+    `<tem:Porcentaje>${t.porcentaje}</tem:Porcentaje>` +
+    (esFisica && t.tipoDni ? `<tem:Tipo_Dni>${t.tipoDni}</tem:Tipo_Dni>` : '') +
+    (esFisica && t.numDni ? `<tem:Num_Dni>${escaparXml(t.numDni)}</tem:Num_Dni>` : '') +
+    `<tem:Nro_Cuit>${escaparXml((t.cuit || '').replace(/\D/g, ''))}</tem:Nro_Cuit>` +
+    (esFisica && t.estadoCivil ? `<tem:Estado_Civil>${t.estadoCivil}</tem:Estado_Civil>` : '') +
+    `<tem:Email>${escaparXml(t.email)}</tem:Email>` +
+    `<tem:Id_Titular_Tipo>${t.idTitularTipo}</tem:Id_Titular_Tipo>` +
+    `<tem:Genero>${t.genero ?? (esFisica ? 1 : 0)}</tem:Genero>` +
+    `<tem:Tipo>${t.tipo ?? 1}</tem:Tipo>` +
+    `<tem:Domicilios>${t.domicilios.map(xmlDomicilio).join('')}</tem:Domicilios>` +
+    `</tem:Titulares>`
+  );
+}
+
+function xmlSolicitante(s: SolicitanteWS): string {
+  return (
+    `<tem:Solicitantes>` +
+    `<tem:TipoPersona>${escaparXml(s.tipoPersona)}</tem:TipoPersona>` +
+    `<tem:PoderInscriptivo>${escaparXml(s.poderInscriptivo)}</tem:PoderInscriptivo>` +
+    `<tem:aceptaFacultades>${s.aceptaFacultades ? 'true' : 'false'}</tem:aceptaFacultades>` +
+    `<tem:Email>${escaparXml(s.email)}</tem:Email>` +
+    (s.nombre ? `<tem:Nombre>${escaparXml(s.nombre)}</tem:Nombre>` : '') +
+    (s.cuit ? `<tem:cuit>${escaparXml(s.cuit.replace(/\D/g, ''))}</tem:cuit>` : '') +
+    (s.nroSolicitante != null ? `<tem:NroSolicitante>${s.nroSolicitante}</tem:NroSolicitante>` : '') +
+    (s.nroPoder ? `<tem:NroPoder>${escaparXml(s.nroPoder)}</tem:NroPoder>` : '') +
+    (s.fecha ? `<tem:Fecha>${escaparXml(s.fecha)}</tem:Fecha>` : '') +
+    `</tem:Solicitantes>`
+  );
+}
+
+/**
+ * Carga una solicitud de marca nueva en el INPI.
+ *
+ * Requiere credenciales del WS (`INPI_WS_CUIT` + `INPI_WS_CLAVE`), que son
+ * **distintas de la Clave Fiscal de ARCA**. La Clave Fiscal no interviene acá:
+ * hace falta después, en el portal, para firmar.
+ */
+export async function ingresarMarcaNuevaWS(marca: MarcaNuevaWS): Promise<RespuestaIngresoWS> {
+  const cuitUsuario = (process.env.INPI_WS_CUIT || '').replace(/\D/g, '');
+  const claveUsuario = process.env.INPI_WS_CLAVE || '';
+
+  if (!cuitUsuario || !claveUsuario) {
+    throw new InpiWsError(
+      'Faltan las credenciales del WS del INPI (INPI_WS_CUIT / INPI_WS_CLAVE)',
+      'Ingresar_MarcasNuevas'
+    );
+  }
+
+  const suma = marca.titulares.reduce((a, t) => a + Number(t.porcentaje || 0), 0);
+  if (Math.abs(suma - 100) > 0.01) {
+    throw new InpiWsError(
+      `Los porcentajes de los titulares deben sumar 100 (suman ${suma})`,
+      'Ingresar_MarcasNuevas'
+    );
+  }
+
+  const cuerpo =
+    `<tem:MarcaNueva>` +
+      `<tem:Solicitud>` +
+        `<tem:TipoS>${marca.tipoMarca ?? 1}</tem:TipoS>` +
+        `<tem:Denominacion>${escaparXml(marca.denominacion)}</tem:Denominacion>` +
+        `<tem:Clase>${marca.clase}</tem:Clase>` +
+      `</tem:Solicitud>` +
+      `<tem:Titulares>${marca.titulares.map(xmlTitular).join('')}</tem:Titulares>` +
+      // Tipo_Proteccion: "S" es el único válido para marcas nuevas (Excel oficial)
+      `<tem:Proteccion>` +
+        `<tem:Tipo_Proteccion>S</tem:Tipo_Proteccion>` +
+        `<tem:Observaciones>${escaparXml(marca.observacionesProteccion || '')}</tem:Observaciones>` +
+      `</tem:Proteccion>` +
+      // Los nodos de lista se mandan aunque vayan vacíos: el manual advierte que
+      // omitirlos puede dar error de referencia nula del lado del servicio.
+      (marca.solicitantes?.length
+        ? `<tem:Solicitantes>${marca.solicitantes.map(xmlSolicitante).join('')}</tem:Solicitantes>`
+        : `<tem:Solicitantes/>`) +
+      (marca.documentacion?.length
+        ? `<tem:Documentacion>${marca.documentacion
+            .map((d) =>
+              `<tem:Documentacion>` +
+              `<tem:Documento>${d.documentoBase64}</tem:Documento>` +
+              `<tem:idIndice>${d.idIndice}</tem:idIndice>` +
+              `</tem:Documentacion>`
+            )
+            .join('')}</tem:Documentacion>`
+        : `<tem:Documentacion/>`) +
+      `<tem:DatosUsuario>` +
+        `<tem:Cuit>${cuitUsuario}</tem:Cuit>` +
+        `<tem:Activa>true</tem:Activa>` +
+        `<tem:Clave>${escaparXml(claveUsuario)}</tem:Clave>` +
+      `</tem:DatosUsuario>` +
+    `</tem:MarcaNueva>`;
+
+  const xml = await llamarSoap('Ingresar_MarcasNuevas', cuerpo);
+
+  // La respuesta es un string simple dentro de Ingresar_MarcasNuevasResult
+  const crudo =
+    textoDe(xml, 'Ingresar_MarcasNuevasResult') ||
+    textoDe(xml, 'Ingresar_MarcasNuevasResponse') ||
+    xml;
+
+  const res = parsearRespuestaIngreso(crudo);
+
+  if (res.ok) {
+    logger.info(`[INPI-WS] Marca "${marca.denominacion}" cl.${marca.clase} cargada — gestión ${res.orden}`);
+  } else {
+    logger.warn(`[INPI-WS] Carga rechazada para "${marca.denominacion}": ${res.mensaje}`);
+  }
+  return res;
 }
 
 // ── Diagnóstico ───────────────────────────────────────────────────────────────

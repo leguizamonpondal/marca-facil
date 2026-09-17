@@ -11,7 +11,7 @@
  */
 import { chromium, Browser, Page, BrowserContext } from 'playwright';
 import { logger } from '../utils/logger';
- 
+
 // ── Utilidades ───────────────────────────────────────────────────────────────
 /** Convierte el formato de fecha .NET /Date(ms)/ a string ISO o vacío */
 function parseDotNetDate(val: any): string | undefined {
@@ -25,7 +25,7 @@ function parseDotNetDate(val: any): string | undefined {
   }
   return s || undefined;
 }
- 
+
 // ── URLs ─────────────────────────────────────────────────────────────────────
 const ARCA_AUTH_URL =
   process.env.ARCA_AUTH_URL ||
@@ -33,13 +33,13 @@ const ARCA_AUTH_URL =
 const INPI_PORTAL_URL =
   process.env.INPI_PORTAL_URL ||
   'https://portaltramitesline.inpi.gob.ar/';
- 
+
 // ── Tipos ────────────────────────────────────────────────────────────────────
 export interface CredencialesARCA {
   cuit: string;      // sin guiones: "20123456789"
   claveFiscal: string;
 }
- 
+
 export interface EstadoActa {
   acta: string;
   denominacion: string;
@@ -52,21 +52,21 @@ export interface EstadoActa {
   observaciones?: string;
   raw?: Record<string, string>;  // todos los campos que devuelva el portal
 }
- 
+
 export interface ResultadoSolicitud {
   acta: string;             // número de acta asignado por INPI
   fechaPresentacion: string;
   comprobante?: string;     // URL o texto del comprobante
   mensaje: string;
 }
- 
+
 export interface PasosSolicitud {
   paso: number;
   descripcion: string;
   estado: 'pendiente' | 'completado' | 'error';
   detalle?: string;
 }
- 
+
 // ── Helper: launch con opciones ───────────────────────────────────────────────
 async function lanzarBrowser(): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
   const browser = await chromium.launch({
@@ -85,15 +85,15 @@ async function lanzarBrowser(): Promise<{ browser: Browser; context: BrowserCont
     viewport: { width: 1280, height: 800 },
   });
   const page = await context.newPage();
- 
+
   // Ocultar señales de automatización
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   });
- 
+
   return { browser, context, page };
 }
- 
+
 // ── Autenticación ARCA ────────────────────────────────────────────────────────
 /**
  * Navega al portal ARCA, ingresa CUIT + Clave Fiscal y espera
@@ -105,10 +105,10 @@ async function lanzarBrowser(): Promise<{ browser: Browser; context: BrowserCont
  */
 async function autenticarARCA(page: Page, creds: CredencialesARCA): Promise<void> {
   logger.info('[INPI] Iniciando autenticación ARCA');
- 
+
   // Paso 1: cargar el portal INPI y hacer click en "Acceder con Clave Fiscal"
   await page.goto(INPI_PORTAL_URL, { waitUntil: 'networkidle', timeout: 30_000 });
- 
+
   // Buscar el botón de login ARCA/AFIP en INPI
   const loginBtn = page.locator('a[href*="afip"], a[href*="arca"], button:has-text("Clave Fiscal"), a:has-text("Clave Fiscal"), a:has-text("AFIP"), a:has-text("ARCA")').first();
   if (await loginBtn.count() === 0) {
@@ -118,51 +118,51 @@ async function autenticarARCA(page: Page, creds: CredencialesARCA): Promise<void
     await loginBtn.click();
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 });
   }
- 
+
   // Paso 2: pantalla CUIT
   await page.waitForSelector('input[name="F1:username"], input[id*="cuit"], input[type="text"]', { timeout: 15_000 });
   const inputCuit = page.locator('input[name="F1:username"], input[id*="cuit"]').first();
   await inputCuit.fill(creds.cuit);
   await page.click('input[name="F1:btnSiguiente"], button[id*="siguiente"], input[value="Siguiente"]');
- 
+
   // Paso 3: pantalla Clave Fiscal
   await page.waitForSelector('input[name="F1:password"], input[type="password"]', { timeout: 15_000 });
   await page.fill('input[name="F1:password"], input[type="password"]', creds.claveFiscal);
   await page.click('input[name="F1:btnIngresar"], button[id*="ingresar"], input[value="Ingresar"]');
- 
+
   // Esperar redirect de vuelta (INPI o selector de servicios ARCA)
   await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 });
- 
+
   // Si hay pantalla de selección de servicio INPI, hacer click
   const inpiLink = page.locator('a:has-text("INPI"), a[href*="inpi"]').first();
   if (await inpiLink.count() > 0) {
     await inpiLink.click();
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 });
   }
- 
+
   logger.info('[INPI] Autenticación ARCA completada');
 }
- 
+
 // ── Consulta de estado de acta ────────────────────────────────────────────────
 export async function consultarEstadoActa(
   acta: string,
   creds: CredencialesARCA,
 ): Promise<EstadoActa> {
   const { browser, page } = await lanzarBrowser();
- 
+
   try {
     await autenticarARCA(page, creds);
- 
+
     // Navegar a la sección Consultas / Estado de trámite
     const consultaUrl = `${INPI_PORTAL_URL}consultas/estado-tramite`;
     await page.goto(consultaUrl, { waitUntil: 'networkidle', timeout: 20_000 });
- 
+
     // Completar campo de número de acta
     const inputActa = page.locator('input[name*="acta"], input[placeholder*="acta"], input[id*="acta"]').first();
     await inputActa.fill(acta);
     await page.click('button[type="submit"], input[type="submit"], button:has-text("Buscar"), button:has-text("Consultar")');
     await page.waitForLoadState('networkidle', { timeout: 20_000 });
- 
+
     // Extraer datos del resultado usando la API de locators de Playwright (sin DOM types)
     const getLocatorText = async (selectors: string[]): Promise<string> => {
       for (const sel of selectors) {
@@ -174,7 +174,7 @@ export async function consultarEstadoActa(
       }
       return '';
     };
- 
+
     const resultado = {
       denominacion: await getLocatorText(['[class*="denominacion"]', '.marca-nombre', 'td:nth-of-type(2)']),
       estado:       await getLocatorText(['[class*="estado"]', '.tramite-estado']),
@@ -185,13 +185,13 @@ export async function consultarEstadoActa(
       fechaPublicacion: await getLocatorText(['[class*="fecha-publicacion"]', '.fecha-boletin']),
       observaciones: await getLocatorText(['[class*="observacion"]', '.obs']),
     };
- 
+
     // Fallback: si no extrae bien, tomar el HTML crudo de la tabla de resultados
     if (!resultado.denominacion && !resultado.estado) {
       const tablaTexto = await page.locator('table, .resultado, .tramite-detalle').first().innerText().catch(() => '');
       logger.warn(`[INPI] Extracción parcial para acta ${acta}. HTML: ${tablaTexto.slice(0, 300)}`);
     }
- 
+
     return {
       acta,
       denominacion: resultado.denominacion || '(no disponible)',
@@ -207,7 +207,7 @@ export async function consultarEstadoActa(
     await browser.close();
   }
 }
- 
+
 // ── Búsqueda de marcas por denominación en INPI (para factibilidad) ──────────
 /**
  * Busca marcas en el registro argentino del INPI por denominación y clase.
@@ -235,7 +235,7 @@ export interface MarcaINPI {
   fechaPublicacion?: string;
   vencimiento?: string;
 }
- 
+
 /**
  * Busca marcas en el INPI Argentina mediante POST directo al endpoint JSON real.
  *
@@ -256,8 +256,14 @@ interface ParamsBusquedaINPI {
   denominacion?: string;
   clase?: number;         // 0 = todas las clases
   titular?: string;
+  /**
+   * Modo de coincidencia del titular, tal como lo expone el desplegable del
+   * portal del INPI: '1' = CONTIENE (default), '0' = EMPIEZA CON.
+   * Es la vía **oficial** para la búsqueda parcial — el Web Service no la tiene.
+   */
+  tipoBusquedaTitular?: '0' | '1';
 }
- 
+
 async function buscarPorPostINPI(
   denominacionOrParams: string | ParamsBusquedaINPI,
   claseArg?: number,
@@ -266,6 +272,7 @@ async function buscarPorPostINPI(
   let denominacion = '';
   let clase = 0;
   let titular = '';
+  let tipoBusquedaTitular: '0' | '1' = '1';   // 1 = Contiene (opción oficial del portal)
   if (typeof denominacionOrParams === 'string') {
     denominacion = denominacionOrParams;
     clase = claseArg ?? 0;
@@ -273,16 +280,17 @@ async function buscarPorPostINPI(
     denominacion = denominacionOrParams.denominacion ?? '';
     clase = denominacionOrParams.clase ?? 0;
     titular = denominacionOrParams.titular ?? '';
+    tipoBusquedaTitular = denominacionOrParams.tipoBusquedaTitular ?? '1';
   }
- 
+
   const { default: axios } = await import('axios');
- 
+
   const BASE = 'https://portaltramites.inpi.gob.ar';
   const BUSQUEDA_URL = `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`;
   const GRILLA_URL = `${BASE}/MarcasConsultas/GrillaMarcasAvanzada`;
- 
+
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
- 
+
   // Paso 1: GET al portal para obtener cookies de sesión (ASP.NET Session)
   let cookies = '';
   try {
@@ -298,28 +306,38 @@ async function buscarPorPostINPI(
   } catch (err: any) {
     logger.warn(`[INPI POST] Error obteniendo sesión: ${err.message}`);
   }
- 
+
   const marcas: MarcaINPI[] = [];
- 
+
   // Paso 2: POST JSON al endpoint real descubierto
   // clase=0 → Clase: '' → todas las clases (igual que el portal del INPI sin filtro)
+  // ⚠️ El endpoint devuelve como máximo `LIMITE` filas por llamada. Sin paginar,
+  // una búsqueda por titular queda truncada en silencio (NIKE tiene 240 marcas)
+  // y un estudio de factibilidad se firmaría con antecedentes faltantes.
+  // Se pagina con `offset` hasta que una página vuelva incompleta.
+  const LIMITE = 50;
+  const MAX_PAGINAS = 40;          // techo de seguridad: 2.000 resultados
+  let ultimaData: any = null;
+  let truncado = false;
+
   try {
+    for (let pagina = 0; pagina < MAX_PAGINAS; pagina++) {
     const jsonBody = {
       Tipo_Resolucion: '',
       Clase: clase > 0 ? String(clase) : '',
       TipoBusquedaDenominacion: '1',   // 1 = Contiene (0 = Empieza con)
       Denominacion: denominacion,
       Titular: titular,
-      TipoBusquedaTitular: '1',        // 1 = Contiene (0 = Empieza con)
+      TipoBusquedaTitular: tipoBusquedaTitular,   // 1 = Contiene (0 = Empieza con)
       Fecha_IngresoDesde: '',
       Fecha_IngresoHasta: '',
       Fecha_ResolucionDesde: '',
       Fecha_ResolucionHasta: '',
       vigentes: true,
-      limit: 50,
-      offset: 0,
+      limit: LIMITE,
+      offset: pagina * LIMITE,
     };
- 
+
     const { data } = await axios.post(GRILLA_URL, jsonBody, {
       timeout: 25_000,
       headers: {
@@ -334,21 +352,25 @@ async function buscarPorPostINPI(
       },
       maxRedirects: 0,
     });
- 
-    logger.info(`[INPI POST] Respuesta JSON recibida: ${JSON.stringify(data).length} bytes`);
- 
+
+    ultimaData = data;
+    logger.info(`[INPI POST] Página ${pagina + 1}: respuesta de ${JSON.stringify(data).length} bytes`);
+
     // Parsear respuesta JSON
     // La respuesta puede ser: array directo, { data: [...] }, { marcas: [...] }, { rows: [...] }
     const lista: any[] = Array.isArray(data)
       ? data
       : (data?.data ?? data?.marcas ?? data?.rows ?? data?.resultado ?? []);
- 
-    // LOG de diagnóstico: keys del primer ítem para mapear campos
-    if (lista.length > 0) {
+
+    // Página vacía: no hay más resultados
+    if (lista.length === 0) break;
+
+    // LOG de diagnóstico: keys del primer ítem para mapear campos (solo 1ª página)
+    if (pagina === 0) {
       logger.info(`[INPI POST] Keys del primer ítem: ${Object.keys(lista[0]).join(', ')}`);
       logger.info(`[INPI POST] Primer ítem crudo: ${JSON.stringify(lista[0]).slice(0, 500)}`);
     }
- 
+
     for (const item of lista) {
       const acta = String(item.Acta ?? item.acta ?? item.NumActa ?? item.nro_acta ?? '').replace(/\D/g, '');
       const denom = String(item.Denominacion ?? item.denominacion ?? item.nombre ?? '').trim();
@@ -394,10 +416,23 @@ async function buscarPorPostINPI(
         ),
       });
     }
- 
+
+    // Página incompleta → era la última
+    if (lista.length < LIMITE) break;
+
+    // Se agotó el techo de páginas con resultados todavía pendientes
+    if (pagina === MAX_PAGINAS - 1) {
+      truncado = true;
+      logger.warn(
+        `[INPI POST] ⚠️ Se alcanzó el techo de ${MAX_PAGINAS} páginas (${marcas.length} resultados). ` +
+        `La búsqueda puede estar incompleta.`
+      );
+    }
+    }   // fin del bucle de paginación
+
     // Si la respuesta es un string HTML en vez de JSON, intentar parsear tabla
-    if (marcas.length === 0 && typeof data === 'string' && String(data).includes('<tr')) {
-      const html = String(data);
+    if (marcas.length === 0 && typeof ultimaData === 'string' && String(ultimaData).includes('<tr')) {
+      const html = String(ultimaData);
       const filas = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
       for (const fila of filas) {
         const celdas = [...fila[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)]
@@ -417,15 +452,18 @@ async function buscarPorPostINPI(
         });
       }
     }
- 
+
   } catch (err: any) {
     logger.warn(`[INPI POST] Error en búsqueda JSON: ${err.message}`);
   }
- 
-  logger.info(`[INPI POST] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
+
+  const criterio = titular
+    ? `titular "${titular}" [${tipoBusquedaTitular === '1' ? 'contiene' : 'empieza'}]`
+    : `"${denominacion}" clase ${clase}`;
+  logger.info(`[INPI POST] ${marcas.length} marcas para ${criterio}${truncado ? ' (TRUNCADO)' : ''}`);
   return marcas;
 }
- 
+
 export async function buscarMarcasPublicoINPI(
   denominacion: string,
   clase: number,   // 0 = todas las clases
@@ -435,26 +473,30 @@ export async function buscarMarcasPublicoINPI(
   if (resultadosPost.length > 0) {
     return resultadosPost;
   }
- 
+
   // 2. Fallback: Playwright (requiere Chromium instalado en el contenedor)
   logger.info(`[INPI] POST directo sin resultados — usando Playwright para "${denominacion}" clase ${clase}`);
   return buscarMarcasPlaywright(denominacion, clase);
 }
- 
+
 /**
  * Busca todas las marcas vigentes de un titular en el INPI.
  * Útil para que el usuario importe su portfolio de marcas a la app.
  */
-export async function buscarPorTitularINPI(titular: string): Promise<MarcaINPI[]> {
-  logger.info(`[INPI] Búsqueda por titular: "${titular}"`);
-  const resultados = await buscarPorPostINPI({ titular, denominacion: '', clase: 0 });
+export async function buscarPorTitularINPI(
+  titular: string,
+  modo: 'empieza' | 'contiene' = 'contiene',
+): Promise<MarcaINPI[]> {
+  const tipoBusquedaTitular = modo === 'empieza' ? '0' : '1';
+  logger.info(`[INPI] Búsqueda por titular: "${titular}" [${modo}]`);
+  const resultados = await buscarPorPostINPI({ titular, denominacion: '', clase: 0, tipoBusquedaTitular });
   if (resultados.length > 0) return resultados;
- 
+
   // Fallback Playwright si el POST directo no devolvió resultados
   logger.info(`[INPI] POST sin resultados para titular — usando Playwright`);
   return buscarMarcasPlaywright('', 0, titular);
 }
- 
+
 /**
  * Busca marcas por CUIT del titular en el INPI.
  * Usa el CUIT como término de búsqueda en el campo titular (modo Contiene).
@@ -465,22 +507,22 @@ export async function buscarPorCuitINPI(cuit: string): Promise<MarcaINPI[]> {
   logger.info(`[INPI] Búsqueda por CUIT: "${cuitNorm}"`);
   const resultados = await buscarPorPostINPI({ titular: cuitNorm, denominacion: '', clase: 0 });
   if (resultados.length > 0) return resultados;
- 
+
   logger.info(`[INPI] POST sin resultados para CUIT — usando Playwright`);
   return buscarMarcasPlaywright('', 0, cuitNorm);
 }
- 
+
 // URL oficial del buscador público de antecedentes del INPI
 const INPI_BUSQUEDA_URL = 'https://portaltramites.inpi.gob.ar/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA';
- 
+
 async function buscarMarcasPlaywright(denominacion: string, clase: number, titular = ''): Promise<MarcaINPI[]> {
   const { browser, context, page } = await lanzarBrowser();
   const marcas: MarcaINPI[] = [];
- 
+
   try {
     logger.info(`[INPI Playwright] Navegando a: ${INPI_BUSQUEDA_URL}`);
     await page.goto(INPI_BUSQUEDA_URL, { waitUntil: 'networkidle', timeout: 30_000 });
- 
+
     logger.info('[INPI Playwright] Enviando búsqueda JSON vía fetch() interno a GrillaMarcasAvanzada');
     const respuesta = await page.evaluate(async (params: { den: string; cls: string; tit: string }) => {
       try {
@@ -499,7 +541,7 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number, titul
           limit: 50,
           offset: 0,
         });
- 
+
         const resp = await fetch('/MarcasConsultas/GrillaMarcasAvanzada', {
           method: 'POST',
           headers: {
@@ -516,9 +558,9 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number, titul
         return { ok: false, status: 0, body: `ERROR:${e.message}` };
       }
     }, { den: denominacion, cls: clase > 0 ? String(clase) : '', tit: titular });
- 
+
     logger.info(`[INPI Playwright] Respuesta: status=${respuesta.status}, bytes=${respuesta.body.length}`);
- 
+
     // Parsear JSON
     const body = respuesta.body;
     if (!body.startsWith('ERROR') && (body.startsWith('[') || body.startsWith('{'))) {
@@ -548,17 +590,17 @@ async function buscarMarcasPlaywright(denominacion: string, clase: number, titul
         logger.warn(`[INPI Playwright] Error parseando JSON: ${e.message}. Body: ${body.slice(0, 200)}`);
       }
     }
- 
+
     logger.info(`[INPI Playwright] ${marcas.length} marcas para "${denominacion}" clase ${clase}`);
   } catch (err: any) {
     logger.warn(`[INPI Playwright] Error: ${err.message}`);
   } finally {
     await browser.close();
   }
- 
+
   return marcas;
 }
- 
+
 // ── Consulta de acta SIN credenciales (API pública INPI) ─────────────────────
 /**
  * El INPI tiene una API pública de consulta que no requiere autenticación.
@@ -571,7 +613,7 @@ export async function consultarEstadoActaPublico(acta: string): Promise<EstadoAc
     `https://www.inpi.gob.ar/rest/consulta/marcas/${acta}`,
     `https://portaltramitesline.inpi.gob.ar/api/consulta/${acta}`,
   ];
- 
+
   for (const url of baseUrls) {
     try {
       const { data } = await axios.get(url, {
@@ -599,7 +641,7 @@ export async function consultarEstadoActaPublico(acta: string): Promise<EstadoAc
   }
   return null;
 }
- 
+
 // ── Presentación de solicitud de marca ───────────────────────────────────────
 export interface DatosSolicitud {
   denominacion: string;
@@ -614,7 +656,7 @@ export interface DatosSolicitud {
   imagenBase64?: string;
   imagenMimeType?: string;
 }
- 
+
 export async function presentarSolicitud(
   datos: DatosSolicitud,
   creds: CredencialesARCA,
@@ -628,14 +670,14 @@ export async function presentarSolicitud(
     { paso: 6, descripcion: 'Confirmación y envío', estado: 'pendiente' },
     { paso: 7, descripcion: 'Obtención número de acta', estado: 'pendiente' },
   ];
- 
+
   const marcarPaso = (n: number, estado: PasosSolicitud['estado'], detalle?: string) => {
     const p = pasos.find(p => p.paso === n);
     if (p) { p.estado = estado; p.detalle = detalle; }
   };
- 
+
   const { browser, page } = await lanzarBrowser();
- 
+
   try {
     // Paso 1: Autenticación
     try {
@@ -645,7 +687,7 @@ export async function presentarSolicitud(
       marcarPaso(1, 'error', err.message);
       return { pasos, error: `Error de autenticación: ${err.message}` };
     }
- 
+
     // Paso 2: Acceso al portal
     try {
       marcarPaso(2, 'completado');
@@ -653,7 +695,7 @@ export async function presentarSolicitud(
       marcarPaso(2, 'error', err.message);
       return { pasos, error: `Error accediendo al portal INPI: ${err.message}` };
     }
- 
+
     // Paso 3: Nueva solicitud
     try {
       await page.goto(`${INPI_PORTAL_URL}marcas/nueva-solicitud`, { waitUntil: 'networkidle', timeout: 20_000 });
@@ -665,29 +707,29 @@ export async function presentarSolicitud(
       marcarPaso(3, 'error', err.message);
       return { pasos, error: `No se pudo abrir el formulario de nueva solicitud: ${err.message}` };
     }
- 
+
     // Paso 4: Datos de la marca
     try {
       // Denominación
       const inputDenom = page.locator('input[name*="denominacion"], input[id*="denominacion"], input[placeholder*="Denominación"]').first();
       if (await inputDenom.count() > 0) await inputDenom.fill(datos.denominacion);
- 
+
       // Tipo de marca
       const selectTipo = page.locator('select[name*="tipo"], select[id*="tipo"]').first();
       if (await selectTipo.count() > 0) {
         await selectTipo.selectOption({ label: datos.tipoMarca.charAt(0) + datos.tipoMarca.slice(1).toLowerCase() });
       }
- 
+
       // Clase de Niza
       const selectClase = page.locator('select[name*="clase"], select[id*="clase"]').first();
       if (await selectClase.count() > 0) {
         await selectClase.selectOption({ value: String(datos.claseNiza) });
       }
- 
+
       // Descripción de productos/servicios
       const textareaDesc = page.locator('textarea[name*="producto"], textarea[name*="servicio"], textarea[id*="descripcion"]').first();
       if (await textareaDesc.count() > 0) await textareaDesc.fill(datos.descripcionProductos);
- 
+
       // Imagen (para marcas figurativas o mixtas)
       if (datos.imagenBase64 && (datos.tipoMarca === 'FIGURATIVA' || datos.tipoMarca === 'MIXTA')) {
         const inputFile = page.locator('input[type="file"]').first();
@@ -701,13 +743,13 @@ export async function presentarSolicitud(
           await inputFile.setInputFiles(tmpPath);
         }
       }
- 
+
       marcarPaso(4, 'completado');
     } catch (err: any) {
       marcarPaso(4, 'error', err.message);
       return { pasos, error: `Error completando datos de la marca: ${err.message}` };
     }
- 
+
     // Paso 5: Datos del titular
     try {
       const btnSiguiente = page.locator('button:has-text("Siguiente"), input[value="Siguiente"]').first();
@@ -715,29 +757,29 @@ export async function presentarSolicitud(
         await btnSiguiente.click();
         await page.waitForLoadState('networkidle', { timeout: 15_000 });
       }
- 
+
       const inputTitular = page.locator('input[name*="titular"], input[id*="titular"]').first();
       if (await inputTitular.count() > 0) await inputTitular.fill(datos.titularNombre);
- 
+
       const inputCuit = page.locator('input[name*="cuit"], input[id*="cuit"]').first();
       if (await inputCuit.count() > 0) await inputCuit.fill(datos.titularCuit);
- 
+
       if (datos.titularDomicilio) {
         const inputDom = page.locator('input[name*="domicilio"], input[id*="domicilio"]').first();
         if (await inputDom.count() > 0) await inputDom.fill(datos.titularDomicilio);
       }
- 
+
       if (datos.titularEmail) {
         const inputEmail = page.locator('input[type="email"], input[name*="email"]').first();
         if (await inputEmail.count() > 0) await inputEmail.fill(datos.titularEmail);
       }
- 
+
       marcarPaso(5, 'completado');
     } catch (err: any) {
       marcarPaso(5, 'error', err.message);
       return { pasos, error: `Error completando datos del titular: ${err.message}` };
     }
- 
+
     // Paso 6: Confirmación y envío
     try {
       const btnConfirmar = page.locator('button:has-text("Confirmar"), button:has-text("Presentar"), input[value="Confirmar"], input[value="Enviar"]').first();
@@ -750,17 +792,17 @@ export async function presentarSolicitud(
       marcarPaso(6, 'error', err.message);
       return { pasos, error: `Error en la confirmación: ${err.message}` };
     }
- 
+
     // Paso 7: Obtener número de acta
     try {
       const actaTexto = await page.locator('[class*="acta"], .numero-acta, .tramite-numero, h2, h3').first().innerText().catch(() => '');
       const actaMatch = actaTexto.match(/(\d{7,})/);
       const actaAsignada = actaMatch ? actaMatch[1] : 'Pendiente';
- 
+
       const comprobante = await page.locator('.comprobante, .constancia').first().innerText().catch(() => '');
- 
+
       marcarPaso(7, 'completado', `Acta N° ${actaAsignada}`);
- 
+
       return {
         pasos,
         resultado: {
