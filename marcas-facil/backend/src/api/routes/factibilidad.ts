@@ -106,9 +106,10 @@ const FACTIBILIDAD_DIR = path.join(process.cwd(), 'uploads', 'factibilidad');
 // llega al servicio.
 //   /api/factibilidad/ws-test
 //   /api/factibilidad/ws-test?denominacion=ADIDAS
-//   /api/factibilidad/ws-test?titular=NIKE
-//   /api/factibilidad/ws-test?titular=NIKE&modo=contiene
+//   /api/factibilidad/ws-test?titular=NIKE          (siempre "empieza con")
 //   /api/factibilidad/ws-test?cuit=30500000003
+// Nota: el WS no tiene modo "contiene". Para eso está /buscar-titular?modo=contiene,
+// que va por el portal. Ver prepararTitular() en inpiWsService.ts.
 router.get('/ws-test', async (req: any, res: Response) => {
   const { denominacion, titular, cuit } = req.query as Record<string, string | undefined>;
   const inicio = Date.now();
@@ -138,15 +139,13 @@ router.get('/ws-test', async (req: any, res: Response) => {
     }
 
     if (titular || cuit) {
-      const modo = String((req.query as any).modo || '') === 'contiene' ? 'contiene' : 'empieza';
       const marcas = await consultarCuitOTitularWS({
         titular: titular ? String(titular) : undefined,
         cuit: cuit ? String(cuit) : undefined,
-        modo,
       });
       return res.json({
         operacion: 'ConsultaCuitOTitular',
-        consulta: { titular: titular || null, cuit: cuit || null, modo },
+        consulta: { titular: titular || null, cuit: cuit || null, modo: 'empieza' },
         latenciaMs: Date.now() - inicio,
         ...resumir(marcas),
         muestra: marcas.slice(0, 5),
@@ -559,16 +558,30 @@ router.get('/buscar-titular', async (req: AuthRequest, res: Response, next: Next
     const soloObstaculizantes = String(req.query.soloObstaculizantes ?? 'false') === 'true';
 
     // ?modo=contiene busca el texto en cualquier parte del nombre del titular
-    // ("COMERCIAL NIKE SRL" aparece buscando "NIKE"). Por defecto 'empieza',
-    // que es el comportamiento nativo del WS. Ver prepararTitular().
+    // ("COMERCIAL NIKE SRL" aparece buscando "NIKE"). Por defecto 'empieza'.
     const modo = String(req.query.modo || '') === 'contiene' ? 'contiene' : 'empieza';
 
     logger.info(`[Factibilidad] Búsqueda por titular: "${titular}" [${modo}] — Usuario ${req.user!.id}`);
-    const { marcas, fuente } = await consultarConFallback(
-      'buscar-titular',
-      () => buscarPorTitularWS(titular, modo),
-      () => buscarPorTitularINPI(titular)
-    );
+
+    // ⚠️ Cada modo tiene SU fuente, y no son intercambiables:
+    //
+    //  · 'empieza'  → Web Service (rápido, oficial, es lo único que sabe hacer).
+    //  · 'contiene' → portal, con TipoBusquedaTitular='1' — la opción oficial del
+    //                 desplegable del buscador. El WS NO tiene modo contiene: el
+    //                 truco del "%" quedó desautorizado por el INPI el 15/09/2026.
+    //
+    // Por eso 'contiene' NO usa el WS como fuente primaria: hacerlo devolvería
+    // resultados de "empieza con" etiquetados como "contiene", que es
+    // exactamente el error silencioso que se quiere evitar.
+    const { marcas, fuente }: { marcas: MarcaINPI[]; fuente: 'ws-inpi' | 'scraping' } =
+      modo === 'contiene'
+        ? { marcas: await buscarPorTitularINPI(titular, 'contiene'), fuente: 'scraping' }
+        : await consultarConFallback(
+            'buscar-titular[empieza]',
+            () => buscarPorTitularWS(titular),
+            () => buscarPorTitularINPI(titular, 'empieza')
+          );
+
     res.json(armarRespuestaBusqueda({ titular, modo }, marcas, fuente, soloObstaculizantes));
   } catch (err) { next(err); }
 });
