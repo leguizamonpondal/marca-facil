@@ -28,6 +28,7 @@ import { logger } from '../../utils/logger';
 import {
   ingresarMarcaNuevaWS,
   parsearRespuestaIngreso,
+  repartirPorcentajes,
   type MarcaNuevaWS,
 } from '../../services/inpiWsService';
 
@@ -67,30 +68,59 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
   // (persona jurídica). Distinto del CUIT de Honorio a propósito: es lo que
   // fuerza la validación del nodo Solicitantes.
   const cuitTitular = String(req.query.cuitTitular || '30500000003').replace(/\D/g, '');
-  const denominacion = String(req.query.denominacion || 'PRUEBA MARCA FACIL WS 001');
+  const denominacion = String(req.query.denominacion || 'PRUEBA MARCA FACIL WS 002');
   const clase = parseInt(String(req.query.clase || '25'), 10) || 25;
   const email = String(req.query.email || 'leguizamonpondal@gmail.com');
+
+  const domiciliosPrueba = [
+    { tipo: 1 as const, idPais: 9, idProvincia: 1, localidad: 'CABA', domicilio: 'Calle de prueba', numero: 100, codPostal: '1000' },
+    { tipo: 2 as const, idPais: 9, idProvincia: 1, localidad: 'CABA', domicilio: 'Calle de prueba', numero: 100, codPostal: '1000' },
+  ];
+
+  // &tipoTitular=fisica prueba el camino de la persona física, que ejercita los
+  // campos que en la jurídica salen vacíos a propósito: Tipo_Dni, Num_Dni,
+  // Genero, Estado_Civil y —con estado civil 2 (casado/a)— Conjuge.
+  // El manual: "Para persona jurídica no mandar DNI ni estado civil, Genero = 0".
+  const titularFisica = String(req.query.tipoTitular || '') === 'fisica';
+
+  // &cotitulares=N prueba el caso de varios titulares. En la app, el primero es
+  // el usuario (sus datos ya están del alta) y los demás los carga a mano.
+  // CUITs de prueba distintos entre sí: el manual prohíbe repetirlos.
+  const cantidadCotitulares = Math.min(Math.max(parseInt(String(req.query.cotitulares || '1'), 10) || 1, 1), 4);
+  const CUITS_PRUEBA = ['30500000003', '30546741253', '30500001409', '30707680477'];
 
   const marca: MarcaNuevaWS = {
     denominacion,
     clase,
     tipoMarca: 1,                    // 1 = Denominativa
     observacionesProteccion: 'Prueba técnica de integración. Vestidos, calzados, sombrerería.',
-    titulares: [
-      {
-        nomApe: 'TITULAR DE PRUEBA SA',
-        porcentaje: 100,
-        cuit: cuitTitular,
-        email,
-        idTitularTipo: 2,            // 2 = Jurídica
-        genero: 0,
-        domicilios: [
-          { tipo: 1, idPais: 9, idProvincia: 1, localidad: 'CABA', domicilio: 'Calle de prueba', numero: 100, codPostal: '1000' },
-          { tipo: 2, idPais: 9, idProvincia: 1, localidad: 'CABA', domicilio: 'Calle de prueba', numero: 100, codPostal: '1000' },
-        ],
-      },
-    ],
-    // 🔑 EL PUNTO DE LA PRUEBA: Honorio como agente, no como titular.
+    titulares: titularFisica
+      ? [
+          {
+            // CUIT de prueba de persona humana publicado por el INPI
+            nomApe: 'TITULAR DE PRUEBA PERSONA FISICA',
+            porcentaje: 100,
+            cuit: String(req.query.cuitTitular || '20458255297').replace(/\D/g, ''),
+            email,
+            idTitularTipo: 1,        // 1 = Física
+            tipoDni: 1,              // 1 = DNI
+            numDni: '20458255',
+            genero: 1,               // 1 = Masculino
+            estadoCivil: 2,          // 2 = Casado/a → exige Conjuge
+            conjuge: 'CONYUGE DE PRUEBA',
+            domicilios: domiciliosPrueba,
+          },
+        ]
+      : repartirPorcentajes(cantidadCotitulares).map((porcentaje, i) => ({
+          nomApe: cantidadCotitulares === 1 ? 'TITULAR DE PRUEBA SA' : `COTITULAR DE PRUEBA ${i + 1} SA`,
+          porcentaje,
+          cuit: i === 0 ? cuitTitular : CUITS_PRUEBA[i],
+          email,
+          idTitularTipo: 2 as const,  // 2 = Jurídica
+          genero: 0 as const,
+          domicilios: domiciliosPrueba,
+        })),
+    // 🔑 Honorio como agente que presenta, no como titular.
     solicitantes: [
       {
         tipoPersona: 'A',            // A = agente
@@ -102,12 +132,55 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
     ],
   };
 
+  // 🔑 EL PUNTO DE LA SEGUNDA PRUEBA (gestión 4107717 del 17/09/2026).
+  //
+  // Con solo `Solicitantes`, el formulario impreso mostró:
+  //     CANTIDAD DE REPRESENTACION: 1
+  //     REPRESENTACION → INFO: Sin datos
+  //
+  // Ese formulario es lo que ve el examinador, así que la condición de apoderado
+  // especial tiene que constar ahí. Hipótesis: esa sección se alimenta del nodo
+  // `Representantes`, que en la primera prueba no se mandó.
+  //
+  // Con &representantes=false se puede repetir la prueba anterior para comparar.
+  if (String(req.query.representantes || '') !== 'false') {
+    // 📅 FECHA DEL PODER
+    //
+    // En PRODUCCIÓN este valor es **la fecha en que el usuario aceptó los
+    // términos y condiciones al darse de alta en la app** — ese es el acto por
+    // el cual otorga el poder especial. Sale de `users.createdAt` (o del campo
+    // de aceptación de T&C cuando exista); NUNCA es `new Date()` al momento de
+    // presentar, porque el poder es anterior a la presentación.
+    //
+    // 🧪 En la PRUEBA se manda a propósito una fecha **distinta a la de hoy**:
+    // si el formulario mostrara la fecha de hoy, no sabríamos si es nuestro dato
+    // o un default del INPI. Con una fecha pasada, verla impresa prueba que el
+    // campo viajó.
+    const fechaPoder = String(req.query.fechaPoder || '2026-09-01');
+
+    marca.representantes = [
+      {
+        nombre: 'HONORIO MARTINIANO LEGUIZAMON PONDAL',
+        idTipoPJuridica: 63,                 // 63 = Apoderado Especial
+        cuitGestor: String(process.env.INPI_WS_CUIT || '').replace(/\D/g, ''),
+        agenteRepresentante: 1974,
+        aceptaFacultades: 1,
+        poderInscripto: false,               // el poder especial no se inscribe en el INPI
+        lugarDeCelebracion: 'Ciudad Autónoma de Buenos Aires',
+        fechaPoderInpi: fechaPoder,
+        nombreTitular: marca.titulares[0]?.nomApe,
+        email,
+      },
+    ];
+  }
+
   if (!enviar) {
     return res.json({
       modo: 'dry-run',
       aviso: 'No se envió nada al INPI. Agregá &enviar=true para cargar de verdad.',
-      queSeVaAProbar:
-        'Titular con CUIT distinto al del usuario del WS + Honorio declarado en Solicitantes como agente (TipoPersona="A", NroSolicitante=1974).',
+      queSeVaAProbar: marca.representantes?.length
+        ? 'Si el nodo Representantes (Apoderado Especial, cod. 63 + agente 1974) hace que la sección REPRESENTACION del formulario impreso deje de decir "Sin datos".'
+        : 'Titular con CUIT distinto al del usuario del WS + Honorio solo en Solicitantes (repite la prueba 4107717).',
       credenciales: {
         INPI_WS_CUIT: process.env.INPI_WS_CUIT ? 'seteada' : '❌ FALTA',
         INPI_WS_CLAVE: process.env.INPI_WS_CLAVE ? 'seteada' : '❌ FALTA',
@@ -129,7 +202,7 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
       mensaje: r.mensaje,
       respuestaCruda: r.crudo,
       siguientePaso: r.ok
-        ? `Entrá al portal del INPI con tu Clave Fiscal → "Mis Trámites" y buscá la gestión ${r.orden}. Si aparece y podés firmarla, la arquitectura queda confirmada. Después borrala.`
+        ? `Entrá al portal → "Mis Trámites" → "Trámites para Firmar" → gestión ${r.orden} → botón "Formulario". Mirá la sección REPRESENTACION: si ahora trae tus datos de apoderado especial en vez de "Sin datos", quedó resuelto. Después borrá el trámite.`
         : 'El INPI rechazó la carga. El mensaje de arriba dice por qué — son descripciones de reglas de validación, no códigos.',
     });
   } catch (err: any) {
