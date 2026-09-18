@@ -476,6 +476,82 @@ router.post('/portal/firmar-y-vep', async (req: Request, res: Response) => {
 //
 // Borra una solicitud cargada. Sirve para limpiar los trámites de prueba
 // (4107717, 4107811, 4107812, 4107813, 4109781).
+// ── GET /api/presentacion/portal/limpiar-pruebas ─────────────────────────────
+//
+// ⚠️ TEMPORAL — borrar junto con `/prueba-carga`.
+//
+// Es un GET, no un DELETE, por un motivo práctico: la verificación la hace una
+// persona pegando una URL en el navegador, y desde ahí no se puede mandar un
+// DELETE sin herramientas extra. La lista de IDs está fija en el código para
+// que no pueda borrar nada que no sean las pruebas de esta etapa.
+const GESTIONES_DE_PRUEBA = ['4107717', '4107811', '4107812', '4107813', '4109781'];
+
+router.get('/portal/limpiar-pruebas', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  if (String(req.query.confirmar || '') !== 'true') {
+    return res.status(400).json({
+      error: 'Falta la confirmación explícita',
+      gestiones: GESTIONES_DE_PRUEBA,
+      detalle: 'Agregá &confirmar=true para borrarlas.',
+    });
+  }
+
+  const resultados: Record<string, string> = {};
+  for (const id of GESTIONES_DE_PRUEBA) {
+    try {
+      resultados[id] = await eliminarSolicitud(id);
+    } catch (err: any) {
+      resultados[id] = `❌ ${err?.message || 'error'}`;
+    }
+  }
+  return res.json({ resultados });
+});
+
+// ── GET /api/presentacion/portal/firmar-y-vep ────────────────────────────────
+//
+// ⚠️ TEMPORAL — mismo motivo que arriba: permite disparar el circuito completo
+//    desde la barra de direcciones. El endpoint de verdad es el POST de más
+//    arriba, que es el que va a usar la app.
+//
+// .../portal/firmar-y-vep?id=4109999&cuitPagador=27276917353&confirmar=true&token=XXX
+router.get('/portal/firmar-y-vep', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  if (String(req.query.confirmar || '') !== 'true') {
+    return res.status(400).json({
+      error: 'Falta la confirmación explícita',
+      detalle: 'Firma el trámite ante el INPI y emite un VEP. Agregá &confirmar=true.',
+    });
+  }
+
+  const id = String(req.query.id || '');
+  const cuitPagador = String(req.query.cuitPagador || '');
+  if (!id || !cuitPagador) {
+    return res.status(400).json({ error: 'Faltan los parámetros id y/o cuitPagador' });
+  }
+
+  const inicio = Date.now();
+  try {
+    const r = await presentarYGenerarVep(id, cuitPagador);
+    return res.json({
+      ok: true,
+      latenciaMs: Date.now() - inicio,
+      idSolicitud: r.idSolicitud,
+      firmado: r.firmado,
+      montoPesos: r.montoPesos,
+      nroERecauda: r.nroERecauda,
+      volanteDisponible: Boolean(r.volantePdf),
+      volanteUrl: r.nroERecauda
+        ? `/api/presentacion/portal/volante/${r.nroERecauda}?token=${String(req.query.token)}`
+        : undefined,
+      advertencias: r.advertencias,
+      recordatorio:
+        'El VEP vence el primer día hábil siguiente. Si no se paga, hay que volver a cargar el trámite.',
+    });
+  } catch (err: any) {
+    return responderError(res, err, `falló la presentación de ${id}`);
+  }
+});
+
 router.delete('/portal/solicitud/:id', async (req: Request, res: Response) => {
   if (!exigirToken(req, res)) return;
   if (String(req.query.confirmar || '') !== 'true') {
