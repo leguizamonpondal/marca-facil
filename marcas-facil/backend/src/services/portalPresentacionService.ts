@@ -211,21 +211,45 @@ async function autenticar(): Promise<Sesion> {
     await page.fill('input[name="F1:password"]', clave);
     await page.click('input[name="F1:btnIngresar"]');
 
-    // El SSO + los tres redirects del portal terminan en la home.
-    await page.waitForURL((url) => url.hostname.includes('portaltramites.inpi.gob.ar'), {
-      timeout: TIMEOUT_LOGIN_MS,
-    });
+    // ⚠️ ACÁ ESTUVO EL BUG DE LA PRIMERA PRUEBA CONTRA PRODUCCIÓN.
+    //
+    // Llegar al dominio del portal NO significa tener sesión. Después del SSO
+    // vienen cuatro saltos más:
+    //
+    //   POST /Docs/index/IndexMarcas_CC.asp   ← acá ya estamos en el dominio
+    //   POST /Ingreso/ListaUsuarios     → 302
+    //   GET  /Ingreso/VerificacionUsuario → 302
+    //   GET  /Ingreso/IniciarSesion     → 302
+    //   GET  /                          ← recién acá existe la sesión
+    //
+    // Esperar solo por el hostname cortaba en el primer salto y se copiaban
+    // cookies a medio formar: el login "funcionaba", pero después toda grilla
+    // volvía vacía. Hay que esperar a que la cadena termine.
+    await page.waitForURL(
+      (url) =>
+        url.hostname.includes('portaltramites.inpi.gob.ar') &&
+        !url.pathname.toLowerCase().includes('.asp') &&
+        !/^\/ingreso\//i.test(url.pathname),
+      { timeout: TIMEOUT_LOGIN_MS }
+    );
     await page.waitForLoadState('domcontentloaded');
 
-    // Verificación positiva: si seguimos en ARCA o el portal nos devolvió a la
-    // pantalla de ingreso, la clave no entró.
-    const urlFinal = page.url();
-    if (!urlFinal.includes('portaltramites.inpi.gob.ar') || /\/Ingreso\/(Index)?$/i.test(urlFinal)) {
+    // Navegar a Mis Trámites DENTRO del navegador. Cumple dos funciones:
+    // confirma que la sesión quedó servida, y deja al portal en la pantalla que
+    // espera antes de que le pidan las grillas.
+    await page.goto(`${PORTAL}/Home/MisTramites`, { waitUntil: 'domcontentloaded' });
+
+    // Verificación positiva. "CERRAR SESION" solo aparece cuando hay sesión;
+    // la pantalla de ingreso no lo tiene. Sin este chequeo, un login fallido se
+    // propaga silencioso y reaparece mucho después como una lista vacía.
+    const html = await page.content();
+    if (!/CERRAR\s*SESION/i.test(html)) {
       throw new ErrorPortal(
-        'El login no llegó al portal',
+        'El login no dejó sesión abierta en el portal',
         'login',
-        `Terminó en ${urlFinal}. Revisar que la Clave Fiscal sea la vigente y que ` +
-          'el servicio "inpi_portal" siga habilitado en ARCA.'
+        `Terminó en ${page.url()} pero la página no muestra sesión iniciada. ` +
+          'Revisar que la Clave Fiscal sea la vigente y que el servicio ' +
+          '"inpi_portal" siga habilitado en ARCA.'
       );
     }
 
@@ -239,7 +263,9 @@ async function autenticar(): Promise<Sesion> {
       throw new ErrorPortal('El portal no entregó cookie de sesión', 'login');
     }
 
-    logger.info(`[Portal] Sesión abierta en ${Date.now() - inicio} ms`);
+    logger.info(
+      `[Portal] Sesión abierta en ${Date.now() - inicio} ms (${cookies.length} cookies)`
+    );
     return { cookie, creadaEn: Date.now(), cuit };
   } finally {
     await browser.close();
@@ -254,9 +280,8 @@ async function obtenerSesion(forzar = false): Promise<Sesion> {
   if (loginEnCurso) return loginEnCurso;
 
   loginEnCurso = autenticar()
-    .then(async (s) => {
+    .then((s) => {
       sesionActual = s;
-      await calentarSesion(s);
       return s;
     })
     .finally(() => {
@@ -266,41 +291,21 @@ async function obtenerSesion(forzar = false): Promise<Sesion> {
   return loginEnCurso;
 }
 
-/**
- * Visita `/Home/MisTramites` una vez después del login.
- *
- * Por qué: en el tráfico real el navegador SIEMPRE carga esa página antes de
- * pedir `getTramites`, y el portal parece llevar estado de sesión del lado del
- * servidor (qué pantalla estás mirando). Pedir la grilla "en frío" devolvía
- * tablas vacías. Es una sola petición y se hace una vez por sesión.
- *
- * No es crítica: si falla, se sigue igual y el error aparecerá más adelante con
- * mejor contexto.
- */
-async function calentarSesion(sesion: Sesion): Promise<void> {
-  try {
-    await fetch(`${PORTAL}/Home/MisTramites`, {
-      headers: {
-        Cookie: sesion.cookie,
-        Accept: 'text/html,application/xhtml+xml',
-        'Accept-Language': 'es-419,es;q=0.9',
-      },
-      redirect: 'follow',
-    });
-  } catch (err: any) {
-    logger.warn(`[Portal] No se pudo precargar MisTramites: ${err?.message}`);
-  }
-}
-
 // ── Cliente HTTP del portal ──────────────────────────────────────────────────
 
 /**
- * Cuando la sesión caduca, el portal no devuelve 401: redirige al login y
- * responde HTML con 200. Detectarlo por el contenido es la única forma.
+ * Cuando la sesión caduca o nunca existió, el portal NO devuelve 401: sirve una
+ * página HTML completa con código 200. Detectarlo por el contenido es la única
+ * forma.
+ *
+ * La señal más confiable no es buscar la palabra "login" —el portal no la usa—
+ * sino distinguir página completa de fragmento: `getTramites` devuelve un
+ * pedazo de tabla suelto, sin `<!DOCTYPE` ni `<head>`. Si vino un documento
+ * entero, lo que nos sirvieron no es la grilla.
  */
-function pareceLogin(texto: string, contentType: string): boolean {
+function sesionPerdida(texto: string, contentType: string): boolean {
   if (contentType.includes('application/json')) return false;
-  return /Ingreso\/Index|auth\.afip\.gob\.ar|Clave Fiscal/i.test(texto);
+  return /<!DOCTYPE\s+html|<html[\s>]|auth\.afip\.gob\.ar|Clave Fiscal/i.test(texto);
 }
 
 interface OpcionesPeticion {
@@ -365,7 +370,7 @@ async function portalRequest(
     // Un PDF empieza con "%PDF". Si vino HTML, la sesión se cayó.
     if (buffer.subarray(0, 4).toString() !== '%PDF') {
       const texto = buffer.toString('utf8', 0, 2000);
-      if (!reintento && pareceLogin(texto, contentType)) {
+      if (!reintento && sesionPerdida(texto, contentType)) {
         invalidarSesion();
         await obtenerSesion(true);
         return portalRequest(ruta, opts, true);
@@ -377,11 +382,22 @@ async function portalRequest(
 
   const texto = await res.text();
 
-  if (!reintento && pareceLogin(texto, contentType)) {
-    logger.warn('[Portal] La sesión caducó — reautenticando');
-    invalidarSesion();
-    await obtenerSesion(true);
-    return portalRequest(ruta, opts, true);
+  if (sesionPerdida(texto, contentType)) {
+    if (!reintento) {
+      logger.warn('[Portal] La sesión caducó — reautenticando');
+      invalidarSesion();
+      await obtenerSesion(true);
+      return portalRequest(ruta, opts, true);
+    }
+    // Ya reautenticamos y el portal SIGUE sirviendo una página entera. Antes
+    // esto devolvía el HTML igual, el parser no encontraba filas y el resultado
+    // era una lista vacía indistinguible de "no hay trámites". Mejor romper.
+    throw new ErrorPortal(
+      `El portal devolvió una página completa en vez del contenido de ${ruta}`,
+      'sesion',
+      'La sesión no quedó establecida aunque el login dijo haber funcionado. ' +
+        'Revisar /api/presentacion/portal/debug para ver qué se está sirviendo.'
+    );
   }
 
   if (!res.ok) {
@@ -546,7 +562,7 @@ export async function generarVepQR(
 export async function obtenerGrillaCruda(
   estado: EstadoTramite,
   take = 200
-): Promise<{ largo: number; tieneTabla: boolean; pareceLogin: boolean; muestra: string }> {
+): Promise<{ largo: number; tieneTabla: boolean; sesionPerdida: boolean; muestra: string }> {
   const { texto, contentType } = await portalRequest(
     `/Home/getTramites?estado=${ESTADO_CODIGO[estado]}&skip=0&take=${take}`,
     { metodo: 'GET' }
@@ -554,7 +570,7 @@ export async function obtenerGrillaCruda(
   return {
     largo: texto.length,
     tieneTabla: /<tbody[\s>]/i.test(texto),
-    pareceLogin: pareceLogin(texto, contentType),
+    sesionPerdida: sesionPerdida(texto, contentType),
     muestra: texto.slice(0, 3000),
   };
 }
