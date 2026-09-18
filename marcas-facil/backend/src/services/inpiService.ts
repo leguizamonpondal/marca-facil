@@ -449,6 +449,12 @@ async function buscarPorPostINPI(
           titular: celdas[3] || '',
           estado: celdas[4] || '',
           fechaSolicitud: celdas[5] || undefined,
+          // Este fallback parsea la tabla HTML, que trae menos columnas que el
+          // JSON. Los campos que la grilla no muestra van vacíos en vez de
+          // ausentes: MarcaINPI los declara obligatorios y el resto del código
+          // los lee sin chequear.
+          tipoMarca: celdas[6] || '',
+          nroResolucion: celdas[7] || '',
         });
       }
     }
