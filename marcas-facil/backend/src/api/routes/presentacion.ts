@@ -1,8 +1,17 @@
 /**
  * Presentación de trámites ante el INPI
  * ------------------------------------------------------------------
- * Por ahora contiene UN endpoint de prueba, cuyo único objetivo es responder
- * la pregunta de la que cuelga toda la arquitectura de MARCA FÁCIL:
+ * Dos bloques:
+ *
+ *   1. `/prueba-carga` — endpoint de diagnóstico del Web Service. TEMPORAL:
+ *      ya cumplió su función (gestiones 4107717 / 4107811 / 4107812 / 4107813)
+ *      y hay que borrarlo junto con INPI_TEST_TOKEN.
+ *
+ *   2. `/portal/*` — el circuito de firma, VEP y conciliación contra el portal,
+ *      sobre `portalPresentacionService`. Este se queda, pero hoy está detrás
+ *      del mismo token hasta engancharlo al middleware de auth de la app.
+ *
+ * El comentario que sigue documenta la pregunta que originó el bloque 1:
  *
  *   ¿Un trámite cargado por Web Service con las credenciales de Honorio,
  *   con el CLIENTE como titular y Honorio declarado en `Solicitantes` como
@@ -31,8 +40,48 @@ import {
   repartirPorcentajes,
   type MarcaNuevaWS,
 } from '../../services/inpiWsService';
+import {
+  presentarYGenerarVep,
+  listarComprobantes,
+  descargarVolante,
+  eliminarSolicitud,
+  conciliarPagos,
+  calcularMonto,
+  invalidarSesion,
+  type EstadoTramite,
+} from '../../services/portalPresentacionService';
 
 const router = Router();
+
+// ── Traba de seguridad compartida ────────────────────────────────────────────
+//
+// Estos endpoints operan sobre el portal REAL del INPI con la Clave Fiscal del
+// estudio: firman trámites y emiten volantes de pago. Hasta que estén detrás
+// del middleware de autenticación de la app, quedan cerrados con token.
+function exigirToken(req: Request, res: Response): boolean {
+  const esperado = process.env.INPI_TEST_TOKEN || '';
+  if (!esperado) {
+    res.status(503).json({
+      error: 'Endpoint deshabilitado',
+      detalle: 'Falta la variable INPI_TEST_TOKEN en el entorno.',
+    });
+    return false;
+  }
+  if (String(req.query.token || '') !== esperado) {
+    res.status(403).json({ error: 'Token inválido' });
+    return false;
+  }
+  return true;
+}
+
+function responderError(res: Response, err: any, contexto: string) {
+  logger.error(`[Presentación] ${contexto}: ${err?.message}`);
+  return res.status(502).json({
+    error: err?.message || 'error desconocido',
+    paso: err?.paso,
+    detalle: err?.detalle,
+  });
+}
 
 // ── GET /api/presentacion/prueba-carga ───────────────────────────────────────
 //
@@ -229,6 +278,174 @@ router.get('/parsear', (req: Request, res: Response) => {
   const texto = String(req.query.texto || '');
   if (!texto) return res.status(400).json({ error: 'Falta el parámetro ?texto=' });
   return res.json(parsearRespuestaIngreso(texto));
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PORTAL DE TRÁMITES — firma, VEP y conciliación
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── GET /api/presentacion/portal/estado ──────────────────────────────────────
+//
+// Prueba de vida del login. Es lo PRIMERO que hay que correr después de
+// configurar INPI_PORTAL_CUIT / INPI_PORTAL_CLAVE: abre sesión con Playwright y
+// lee una grilla. No firma ni genera nada.
+router.get('/portal/estado', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const inicio = Date.now();
+  try {
+    if (String(req.query.reautenticar || '') === 'true') invalidarSesion();
+
+    const paraFirmar = await listarComprobantes('para_firmar');
+    const enProceso = await listarComprobantes('en_proceso');
+
+    return res.json({
+      ok: true,
+      latenciaMs: Date.now() - inicio,
+      credenciales: {
+        INPI_PORTAL_CUIT: process.env.INPI_PORTAL_CUIT ? 'seteada' : '❌ FALTA',
+        INPI_PORTAL_CLAVE: process.env.INPI_PORTAL_CLAVE ? 'seteada' : '❌ FALTA',
+      },
+      // La grilla de "para firmar" no es de comprobantes, así que solo sirve
+      // como señal de que la sesión quedó abierta y el portal respondió.
+      sesion: 'abierta',
+      comprobantesEnProceso: enProceso,
+      filasParaFirmar: paraFirmar.length,
+    });
+  } catch (err: any) {
+    return responderError(res, err, 'falló la prueba de login al portal');
+  }
+});
+
+// ── GET /api/presentacion/portal/comprobantes ────────────────────────────────
+//
+// ?estado= incompletos | para_firmar | para_ingresar | en_proceso | ingresados
+// Por defecto en_proceso, que es el feed de conciliación de pagos.
+router.get('/portal/comprobantes', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const estado = (String(req.query.estado || 'en_proceso') as EstadoTramite);
+  try {
+    const comprobantes = await listarComprobantes(estado);
+    return res.json({ estado, total: comprobantes.length, comprobantes });
+  } catch (err: any) {
+    return responderError(res, err, `falló la lectura de la grilla ${estado}`);
+  }
+});
+
+// ── GET /api/presentacion/portal/conciliar ───────────────────────────────────
+//
+// Lo que va a correr la rutina diaria: separa cobrados de pendientes.
+router.get('/portal/conciliar', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  try {
+    const r = await conciliarPagos();
+    return res.json({
+      pagados: r.pagados,
+      pendientes: r.pendientes,
+      resumen: `${r.pagados.length} cobrados · ${r.pendientes.length} pendientes`,
+    });
+  } catch (err: any) {
+    return responderError(res, err, 'falló la conciliación');
+  }
+});
+
+// ── GET /api/presentacion/portal/volante/:nro ────────────────────────────────
+//
+// Devuelve el PDF con el QR. `nro` es el Nro de E-RECAUDA.
+router.get('/portal/volante/:nro', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  try {
+    const pdf = await descargarVolante(String(req.params.nro));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename=Volante-${req.params.nro}.pdf`);
+    return res.send(pdf);
+  } catch (err: any) {
+    return responderError(res, err, `falló la descarga del volante ${req.params.nro}`);
+  }
+});
+
+// ── GET /api/presentacion/portal/arancel/:id ─────────────────────────────────
+//
+// Arancel en pesos según el portal, para contrastar contra nuestro cálculo
+// UMAPI × valor del mes. Solo lee.
+router.get('/portal/arancel/:id', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  try {
+    return res.json({ idSolicitud: req.params.id, montoPesos: await calcularMonto(String(req.params.id)) });
+  } catch (err: any) {
+    return responderError(res, err, `falló el cálculo del arancel de ${req.params.id}`);
+  }
+});
+
+// ── POST /api/presentacion/portal/firmar-y-vep ───────────────────────────────
+//
+// ⚠️ ACCIÓN REAL E IRREVERSIBLE: firma el trámite ante el INPI y emite un
+//    volante de pago. Por eso exige &confirmar=true además del token.
+//
+// Body: { idSolicitud, cuitPagador, montoEsperado? }
+//
+// `cuitPagador` es el CUIT del CLIENTE, no el del estudio: el volante sale a su
+// nombre y el QR lo paga él. Ese es el punto del modelo de negocio.
+router.post('/portal/firmar-y-vep', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  if (String(req.query.confirmar || '') !== 'true') {
+    return res.status(400).json({
+      error: 'Falta la confirmación explícita',
+      detalle:
+        'Este endpoint firma el trámite ante el INPI y emite un VEP. Agregá &confirmar=true.',
+    });
+  }
+
+  const { idSolicitud, cuitPagador, montoEsperado } = req.body || {};
+  if (!idSolicitud || !cuitPagador) {
+    return res.status(400).json({ error: 'Faltan idSolicitud y/o cuitPagador' });
+  }
+
+  const inicio = Date.now();
+  try {
+    const r = await presentarYGenerarVep(
+      String(idSolicitud),
+      String(cuitPagador),
+      montoEsperado !== undefined ? Number(montoEsperado) : undefined
+    );
+
+    return res.json({
+      ok: true,
+      latenciaMs: Date.now() - inicio,
+      idSolicitud: r.idSolicitud,
+      firmado: r.firmado,
+      montoPesos: r.montoPesos,
+      nroERecauda: r.nroERecauda,
+      volanteDisponible: Boolean(r.volantePdf),
+      // El PDF no viaja en el JSON: se descarga aparte.
+      volanteUrl: r.nroERecauda
+        ? `/api/presentacion/portal/volante/${r.nroERecauda}?token=...`
+        : undefined,
+      advertencias: r.advertencias,
+      recordatorio:
+        'El VEP vence el primer día hábil siguiente. Si no se paga, hay que volver a cargar el trámite.',
+    });
+  } catch (err: any) {
+    return responderError(res, err, `falló la presentación de ${idSolicitud}`);
+  }
+});
+
+// ── DELETE /api/presentacion/portal/solicitud/:id ────────────────────────────
+//
+// Borra una solicitud cargada. Sirve para limpiar los trámites de prueba
+// (4107717, 4107811, 4107812, 4107813, 4109781).
+router.delete('/portal/solicitud/:id', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  if (String(req.query.confirmar || '') !== 'true') {
+    return res.status(400).json({ error: 'Agregá &confirmar=true para borrar' });
+  }
+  try {
+    return res.json({ idSolicitud: req.params.id, mensaje: await eliminarSolicitud(String(req.params.id)) });
+  } catch (err: any) {
+    return responderError(res, err, `falló el borrado de ${req.params.id}`);
+  }
 });
 
 export default router;
