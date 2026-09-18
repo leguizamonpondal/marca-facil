@@ -48,6 +48,8 @@ import {
   conciliarPagos,
   calcularMonto,
   invalidarSesion,
+  listarSolicitudes,
+  obtenerGrillaCruda,
   type EstadoTramite,
 } from '../../services/portalPresentacionService';
 
@@ -296,7 +298,10 @@ router.get('/portal/estado', async (req: Request, res: Response) => {
   try {
     if (String(req.query.reautenticar || '') === 'true') invalidarSesion();
 
-    const paraFirmar = await listarComprobantes('para_firmar');
+    // Cada grilla con SU parser: las de solicitudes y la de comprobantes son
+    // tablas distintas y no se pueden leer con el mismo código.
+    const paraFirmar = await listarSolicitudes('para_firmar');
+    const paraIngresar = await listarSolicitudes('para_ingresar');
     const enProceso = await listarComprobantes('en_proceso');
 
     return res.json({
@@ -306,11 +311,16 @@ router.get('/portal/estado', async (req: Request, res: Response) => {
         INPI_PORTAL_CUIT: process.env.INPI_PORTAL_CUIT ? 'seteada' : '❌ FALTA',
         INPI_PORTAL_CLAVE: process.env.INPI_PORTAL_CLAVE ? 'seteada' : '❌ FALTA',
       },
-      // La grilla de "para firmar" no es de comprobantes, así que solo sirve
-      // como señal de que la sesión quedó abierta y el portal respondió.
       sesion: 'abierta',
+      paraFirmar,
+      paraIngresar,
       comprobantesEnProceso: enProceso,
-      filasParaFirmar: paraFirmar.length,
+      // Si los tres vienen vacíos y en el portal SÍ hay trámites, el problema
+      // es de lectura, no de sesión: usar /portal/debug para ver el HTML crudo.
+      pista:
+        paraFirmar.length || paraIngresar.length || enProceso.length
+          ? undefined
+          : 'Las tres grillas vinieron vacías. Revisar con /api/presentacion/portal/debug?estado=en_proceso',
     });
   } catch (err: any) {
     return responderError(res, err, 'falló la prueba de login al portal');
@@ -330,6 +340,36 @@ router.get('/portal/comprobantes', async (req: Request, res: Response) => {
     return res.json({ estado, total: comprobantes.length, comprobantes });
   } catch (err: any) {
     return responderError(res, err, `falló la lectura de la grilla ${estado}`);
+  }
+});
+
+// ── GET /api/presentacion/portal/solicitudes ─────────────────────────────────
+//
+// ?estado= incompletos | para_firmar | para_ingresar
+// Las grillas de solicitudes, con el ID que después se usa para firmar.
+router.get('/portal/solicitudes', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  const estado = String(req.query.estado || 'para_firmar') as EstadoTramite;
+  try {
+    const solicitudes = await listarSolicitudes(estado);
+    return res.json({ estado, total: solicitudes.length, solicitudes });
+  } catch (err: any) {
+    return responderError(res, err, `falló la lectura de solicitudes ${estado}`);
+  }
+});
+
+// ── GET /api/presentacion/portal/debug ───────────────────────────────────────
+//
+// Devuelve el HTML crudo de una grilla. Sirve para distinguir tres casos que
+// desde afuera se ven iguales (lista vacía): que el portal no haya devuelto
+// nada, que haya devuelto la pantalla de login, o que falle el parser.
+router.get('/portal/debug', async (req: Request, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  const estado = String(req.query.estado || 'en_proceso') as EstadoTramite;
+  try {
+    return res.json({ estado, ...(await obtenerGrillaCruda(estado)) });
+  } catch (err: any) {
+    return responderError(res, err, `falló el diagnóstico de ${estado}`);
   }
 });
 
