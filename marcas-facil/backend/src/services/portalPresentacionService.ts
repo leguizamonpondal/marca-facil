@@ -254,8 +254,9 @@ async function obtenerSesion(forzar = false): Promise<Sesion> {
   if (loginEnCurso) return loginEnCurso;
 
   loginEnCurso = autenticar()
-    .then((s) => {
+    .then(async (s) => {
       sesionActual = s;
+      await calentarSesion(s);
       return s;
     })
     .finally(() => {
@@ -263,6 +264,32 @@ async function obtenerSesion(forzar = false): Promise<Sesion> {
     });
 
   return loginEnCurso;
+}
+
+/**
+ * Visita `/Home/MisTramites` una vez después del login.
+ *
+ * Por qué: en el tráfico real el navegador SIEMPRE carga esa página antes de
+ * pedir `getTramites`, y el portal parece llevar estado de sesión del lado del
+ * servidor (qué pantalla estás mirando). Pedir la grilla "en frío" devolvía
+ * tablas vacías. Es una sola petición y se hace una vez por sesión.
+ *
+ * No es crítica: si falla, se sigue igual y el error aparecerá más adelante con
+ * mejor contexto.
+ */
+async function calentarSesion(sesion: Sesion): Promise<void> {
+  try {
+    await fetch(`${PORTAL}/Home/MisTramites`, {
+      headers: {
+        Cookie: sesion.cookie,
+        Accept: 'text/html,application/xhtml+xml',
+        'Accept-Language': 'es-419,es;q=0.9',
+      },
+      redirect: 'follow',
+    });
+  } catch (err: any) {
+    logger.warn(`[Portal] No se pudo precargar MisTramites: ${err?.message}`);
+  }
 }
 
 // ── Cliente HTTP del portal ──────────────────────────────────────────────────
@@ -511,6 +538,79 @@ export async function generarVepQR(
  * `en_proceso` (estado 3) es el feed de conciliación: trae el Nro de E-Recauda
  * junto al estado del VEP.
  */
+/**
+ * Devuelve el HTML crudo de una grilla, sin parsear. Solo para diagnóstico:
+ * cuando una lista vuelve vacía hay que poder distinguir entre "el portal no
+ * devolvió nada", "devolvió la pantalla de login" y "el parser falló".
+ */
+export async function obtenerGrillaCruda(
+  estado: EstadoTramite,
+  take = 200
+): Promise<{ largo: number; tieneTabla: boolean; pareceLogin: boolean; muestra: string }> {
+  const { texto, contentType } = await portalRequest(
+    `/Home/getTramites?estado=${ESTADO_CODIGO[estado]}&skip=0&take=${take}`,
+    { metodo: 'GET' }
+  );
+  return {
+    largo: texto.length,
+    tieneTabla: /<tbody[\s>]/i.test(texto),
+    pareceLogin: pareceLogin(texto, contentType),
+    muestra: texto.slice(0, 3000),
+  };
+}
+
+export interface SolicitudGrilla {
+  idSolicitud: string;
+  clase?: number;
+  acta?: string;
+  descripcion?: string;
+}
+
+/**
+ * Parsea las grillas de SOLICITUDES (incompletos, para firmar, para ingresar).
+ *
+ * Son otra tabla que la de comprobantes y necesitan otro parser: acá no hay Nro
+ * de E-Recauda todavía. El ancla es el atributo `data-idsol` de cada fila, que
+ * es justo el ID que después se usa para firmar.
+ */
+export function parsearGrillaSolicitudes(html: string): SolicitudGrilla[] {
+  const out: SolicitudGrilla[] = [];
+  const vistos = new Set<string>();
+
+  for (const m of html.matchAll(/<tr[^>]*\bdata-idsol="(\d+)"([^>]*)>([\s\S]*?)<\/tr>/gi)) {
+    const idSolicitud = m[1];
+    if (vistos.has(idSolicitud)) continue;
+    vistos.add(idSolicitud);
+
+    const clase = m[2].match(/data-clase="(\d+)"/i);
+    const celdas = [...m[3].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((c) =>
+      c[1].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
+    );
+
+    out.push({
+      idSolicitud,
+      clase: clase ? Number(clase[1]) : undefined,
+      // El acta llega recién cuando el INPI ingresa el trámite; antes es "0".
+      acta: celdas.find((c) => /^\d{7,8}$/.test(c) && c !== idSolicitud),
+      descripcion: celdas.find((c) => /[A-Za-zÁÉÍÓÚÑ]{3,}/.test(c) && c.length < 120),
+    });
+  }
+
+  return out;
+}
+
+/** Lista las solicitudes de una grilla (no los comprobantes de pago). */
+export async function listarSolicitudes(
+  estado: EstadoTramite = 'para_firmar',
+  take = 200
+): Promise<SolicitudGrilla[]> {
+  const { texto } = await portalRequest(
+    `/Home/getTramites?estado=${ESTADO_CODIGO[estado]}&skip=0&take=${take}`,
+    { metodo: 'GET' }
+  );
+  return parsearGrillaSolicitudes(texto);
+}
+
 export async function listarComprobantes(
   estado: EstadoTramite = 'en_proceso',
   take = 200
