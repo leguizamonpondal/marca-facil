@@ -434,7 +434,17 @@ export interface TitularWS {
   numDni?: string;
   /** `Id_EstadoCivil` — 1 = Soltero/a · 2 = Casado/a · 3 = Viudo/a · 4 = Divorciado/a */
   estadoCivil?: 1 | 2 | 3 | 4;
-  /** Presente en el ejemplo oficial con valor 1; el manual no lo documenta. */
+  /**
+   * ⚠️ Nombre del cónyuge. **Obligatorio si `estadoCivil` = 2 (casado/a).**
+   * La etiqueta XML del INPI es `Conjuge` — sin acento y con J. Si se escribe
+   * "Conyuge" el servicio no la reconoce.
+   */
+  conjuge?: string;
+  /** Obligatorio si es jurídica (tipo 2) con domicilio real extranjero. */
+  territorioLegal?: number;
+  /** País. Opcional. */
+  nacionalidad?: number;
+  /** 1 = titular común · otro = inventor. Si no se declara, se asume 1. */
   tipo?: number;
   domicilios: DomicilioWS[];
 }
@@ -464,6 +474,69 @@ export interface SolicitanteWS {
 }
 
 /**
+ * Nodo `Representantes` — quién representa al titular.
+ *
+ * El manual dice que es **obligatorio** cuando ningún titular tiene CUIT válido
+ * (todos extranjeros), pero en la tabla de nodos figura como **condicional para
+ * todos los trámites**: obligatorio en ese caso no significa prohibido en los
+ * demás.
+ *
+ * Y sus campos son exactamente los del poder especial: tipo de representación,
+ * número de agente, si el poder está inscripto, fecha y lugar de otorgamiento.
+ *
+ * 🔍 Motivo de su incorporación: en la prueba 4107717 (17/09/2026) el formulario
+ * impreso mostró "CANTIDAD DE REPRESENTACION: 1" pero la sección REPRESENTACION
+ * decía "Sin datos" — mandando solo `Solicitantes`. Ese formulario es lo que ve
+ * el examinador, así que la representación tiene que constar ahí.
+ *
+ * `Id_Tipo_PJuridica_E` (Excel, solapa PERSONAS):
+ *    2 = Gestor de Negocios
+ *   62 = Apoderado General
+ *   63 = Apoderado Especial   ← el de MARCA FÁCIL
+ *   64 = Apoderado Otro
+ *   65 = Representante legal Socio gerente
+ *   66 = Representante legal Presidente
+ *   67 = Representante legal otro
+ */
+export interface RepresentanteWS {
+  nombre: string;
+  idTipoPJuridica: number;
+  /** CUIT del representante. Debe ser válido. */
+  cuitGestor: string;
+  /** Nro de agente de la propiedad industrial. 0 = particular. */
+  agenteRepresentante?: number;
+  aceptaFacultades?: number;
+  /** ¿El poder está inscripto en el INPI? */
+  poderInscripto?: boolean;
+  numeroPoder?: string;
+  lugarDeCelebracion?: string;
+  /** Fecha del poder — YYYY-MM-DD */
+  fechaPoderInpi?: string;
+  nombreTitular?: string;
+  email?: string;
+}
+
+function xmlRepresentante(r: RepresentanteWS): string {
+  return (
+    `<tem:Representantes>` +
+    `<tem:Nombre>${escaparXml(r.nombre)}</tem:Nombre>` +
+    `<tem:Id_Tipo_PJuridica_E>${r.idTipoPJuridica}</tem:Id_Tipo_PJuridica_E>` +
+    `<tem:cuitgestor>${escaparXml((r.cuitGestor || '').replace(/\D/g, ''))}</tem:cuitgestor>` +
+    `<tem:agenterepresentante>${r.agenteRepresentante ?? 0}</tem:agenterepresentante>` +
+    (r.aceptaFacultades != null ? `<tem:aceptaFacultades>${r.aceptaFacultades}</tem:aceptaFacultades>` : '') +
+    `<tem:poderinscripto>${r.poderInscripto ? 'true' : 'false'}</tem:poderinscripto>` +
+    (r.numeroPoder ? `<tem:numeropoder>${escaparXml(r.numeroPoder)}</tem:numeropoder>` : '') +
+    (r.lugarDeCelebracion ? `<tem:lugardecelebracion>${escaparXml(r.lugarDeCelebracion)}</tem:lugardecelebracion>` : '') +
+    (r.fechaPoderInpi ? `<tem:fechapoderinpi>${escaparXml(r.fechaPoderInpi)}</tem:fechapoderinpi>` : '') +
+    (r.nombreTitular ? `<tem:NombreTitular>${escaparXml(r.nombreTitular)}</tem:NombreTitular>` : '') +
+    (r.email ? `<tem:email>${escaparXml(r.email)}</tem:email>` : '') +
+    // El manual marca `cuit` como "en desuso; dejar 0"
+    `<tem:cuit>0</tem:cuit>` +
+    `</tem:Representantes>`
+  );
+}
+
+/**
  * Nodo `Documentacion` — `idIndice` según el Excel, solapa DOCUMENTACION,
  * fila "MarcasNuevas":
  *   3 = Acompaña Documento de Prioridad
@@ -489,6 +562,7 @@ export interface MarcaNuevaWS {
   observacionesProteccion?: string;
   titulares: TitularWS[];
   solicitantes?: SolicitanteWS[];
+  representantes?: RepresentanteWS[];
   documentacion?: DocumentoWS[];
 }
 
@@ -530,6 +604,32 @@ export function parsearRespuestaIngreso(crudo: string): RespuestaIngresoWS {
   };
 }
 
+/**
+ * Reparte 100% entre N cotitulares.
+ *
+ * ⚠️ **Los porcentajes son SIEMPRE NÚMEROS ENTEROS.** El INPI no admite
+ * decimales, por más que el manual tipifique el campo como "decimal"
+ * (confirmado por el usuario, que presenta estos trámites: con 3 titulares va
+ * 34 / 33 / 33, nunca 33,33).
+ *
+ * El resto se reparte de a 1 entre los primeros, que es como se hace en la
+ * práctica — y no todo junto al primero, que dejaría repartos raros.
+ *
+ *   repartirPorcentajes(2) → [50, 50]
+ *   repartirPorcentajes(3) → [34, 33, 33]
+ *   repartirPorcentajes(4) → [25, 25, 25, 25]
+ *   repartirPorcentajes(6) → [17, 17, 17, 17, 16, 16]
+ *
+ * Es solo el default: en la app el usuario puede pisarlo, porque los
+ * cotitulares rara vez van en partes iguales.
+ */
+export function repartirPorcentajes(cantidad: number): number[] {
+  if (cantidad < 1) return [];
+  const base = Math.floor(100 / cantidad);
+  const resto = 100 - base * cantidad;
+  return Array.from({ length: cantidad }, (_, i) => base + (i < resto ? 1 : 0));
+}
+
 function xmlDomicilio(d: DomicilioWS): string {
   return (
     `<tem:Domicilios>` +
@@ -554,9 +654,17 @@ function xmlTitular(t: TitularWS): string {
     (esFisica && t.numDni ? `<tem:Num_Dni>${escaparXml(t.numDni)}</tem:Num_Dni>` : '') +
     `<tem:Nro_Cuit>${escaparXml((t.cuit || '').replace(/\D/g, ''))}</tem:Nro_Cuit>` +
     (esFisica && t.estadoCivil ? `<tem:Estado_Civil>${t.estadoCivil}</tem:Estado_Civil>` : '') +
+    // Obligatorio cuando Estado_Civil = 2 (casado/a). Ojo con la grafía: `Conjuge`.
+    (esFisica && t.estadoCivil === 2 && t.conjuge
+      ? `<tem:Conjuge>${escaparXml(t.conjuge)}</tem:Conjuge>`
+      : '') +
     `<tem:Email>${escaparXml(t.email)}</tem:Email>` +
     `<tem:Id_Titular_Tipo>${t.idTitularTipo}</tem:Id_Titular_Tipo>` +
     `<tem:Genero>${t.genero ?? (esFisica ? 1 : 0)}</tem:Genero>` +
+    (!esFisica && t.territorioLegal != null
+      ? `<tem:Territorio_Legal>${t.territorioLegal}</tem:Territorio_Legal>`
+      : '') +
+    (t.nacionalidad != null ? `<tem:Nacionalidad>${t.nacionalidad}</tem:Nacionalidad>` : '') +
     `<tem:Tipo>${t.tipo ?? 1}</tem:Tipo>` +
     `<tem:Domicilios>${t.domicilios.map(xmlDomicilio).join('')}</tem:Domicilios>` +
     `</tem:Titulares>`
@@ -597,12 +705,69 @@ export async function ingresarMarcaNuevaWS(marca: MarcaNuevaWS): Promise<Respues
     );
   }
 
+  // Validaciones previas: mejor fallar acá con un mensaje claro que mandar un
+  // XML que el INPI va a rechazar. Reglas tomadas del manual, nodo Titulares.
+  // El INPI no admite decimales en los porcentajes: siempre enteros que sumen 100.
+  const conDecimales = marca.titulares.find((t) => !Number.isInteger(Number(t.porcentaje)));
+  if (conDecimales) {
+    throw new InpiWsError(
+      `El porcentaje de ${conDecimales.nomApe || '(sin nombre)'} tiene decimales (${conDecimales.porcentaje}). ` +
+        `El INPI solo admite números enteros — con 3 titulares va 34/33/33, no 33,33 cada uno.`,
+      'Ingresar_MarcasNuevas'
+    );
+  }
+
   const suma = marca.titulares.reduce((a, t) => a + Number(t.porcentaje || 0), 0);
-  if (Math.abs(suma - 100) > 0.01) {
+  if (suma !== 100) {
     throw new InpiWsError(
       `Los porcentajes de los titulares deben sumar 100 (suman ${suma})`,
       'Ingresar_MarcasNuevas'
     );
+  }
+
+  const cuitsVistos = new Set<string>();
+  for (const t of marca.titulares) {
+    const quien = t.nomApe || '(sin nombre)';
+    const esFisica = t.idTitularTipo === 1;
+    const domicilioRealArgentino = t.domicilios.some((d) => d.tipo === 1 && (d.idPais ?? 9) === 9);
+
+    if (esFisica && domicilioRealArgentino && (!t.tipoDni || !t.numDni)) {
+      throw new InpiWsError(
+        `Falta el documento de ${quien}: una persona física con domicilio real argentino debe declarar tipo y número`,
+        'Ingresar_MarcasNuevas'
+      );
+    }
+    if (esFisica && !t.estadoCivil) {
+      throw new InpiWsError(
+        `Falta el estado civil de ${quien}: es obligatorio para personas físicas`,
+        'Ingresar_MarcasNuevas'
+      );
+    }
+    if (esFisica && t.estadoCivil === 2 && !t.conjuge?.trim()) {
+      throw new InpiWsError(
+        `Falta el cónyuge de ${quien}: el INPI lo exige cuando el estado civil es casado/a`,
+        'Ingresar_MarcasNuevas'
+      );
+    }
+
+    // El CUIT no puede repetirse entre titulares (salvo 0 = extranjero)
+    const cuitNorm = (t.cuit || '').replace(/\D/g, '');
+    if (cuitNorm && cuitNorm !== '0') {
+      if (cuitsVistos.has(cuitNorm)) {
+        throw new InpiWsError(
+          `El CUIT ${cuitNorm} está repetido entre los titulares`,
+          'Ingresar_MarcasNuevas'
+        );
+      }
+      cuitsVistos.add(cuitNorm);
+    }
+
+    if (!t.domicilios.some((d) => d.tipo === 1) || !t.domicilios.some((d) => d.tipo === 2)) {
+      throw new InpiWsError(
+        `${quien} necesita dos domicilios: uno real (tipo 1) y uno legal (tipo 2)`,
+        'Ingresar_MarcasNuevas'
+      );
+    }
   }
 
   const cuerpo =
@@ -623,6 +788,11 @@ export async function ingresarMarcaNuevaWS(marca: MarcaNuevaWS): Promise<Respues
       (marca.solicitantes?.length
         ? `<tem:Solicitantes>${marca.solicitantes.map(xmlSolicitante).join('')}</tem:Solicitantes>`
         : `<tem:Solicitantes/>`) +
+      // Orden de nodos según la tabla del manual: ... Solicitantes, Representantes,
+      // Prioridades, Documentacion ... DatosUsuario
+      (marca.representantes?.length
+        ? `<tem:Representantes>${marca.representantes.map(xmlRepresentante).join('')}</tem:Representantes>`
+        : `<tem:Representantes/>`) +
       (marca.documentacion?.length
         ? `<tem:Documentacion>${marca.documentacion
             .map((d) =>
