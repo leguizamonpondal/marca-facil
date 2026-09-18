@@ -70,7 +70,13 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
   const cuitTitular = String(req.query.cuitTitular || '30500000003').replace(/\D/g, '');
   const denominacion = String(req.query.denominacion || 'PRUEBA MARCA FACIL WS 002');
   const clase = parseInt(String(req.query.clase || '25'), 10) || 25;
+  // Mail del TITULAR. En producción sale de la ficha del cliente.
   const email = String(req.query.email || 'leguizamonpondal@gmail.com');
+
+  // Mail del AGENTE — es el profesional, no el personal, y es distinto del
+  // titular. Configurable por entorno para que el día que cambie no haya que
+  // tocar código (p. ej. al constituirse la SAS).
+  const emailAgente = process.env.INPI_EMAIL_AGENTE || 'estudio@leguizamonpondal.com';
 
   const domiciliosPrueba = [
     { tipo: 1 as const, idPais: 9, idProvincia: 1, localidad: 'CABA', domicilio: 'Calle de prueba', numero: 100, codPostal: '1000' },
@@ -127,7 +133,7 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
         nroSolicitante: 1974,        // matrícula de Agente de la Propiedad Industrial
         poderInscriptivo: 'NO',      // el poder especial no está inscripto en el INPI
         aceptaFacultades: true,
-        email,
+        email: emailAgente,
       },
     ],
   };
@@ -169,7 +175,7 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
         lugarDeCelebracion: 'Ciudad Autónoma de Buenos Aires',
         fechaPoderInpi: fechaPoder,
         nombreTitular: marca.titulares[0]?.nomApe,
-        email,
+        email: emailAgente,
       },
     ];
   }
