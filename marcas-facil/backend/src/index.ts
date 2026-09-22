@@ -23,6 +23,7 @@ import factibilidadRoutes from './api/routes/factibilidad';
 import inpiRoutes from './api/routes/inpi';
 import clasificadorRoutes from './api/routes/clasificador';
 import presentacionRoutes from './api/routes/presentacion';
+import emailRoutes from './api/routes/email';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -84,6 +85,7 @@ app.use('/api/factibilidad', factibilidadRoutes);
 app.use('/api/inpi', inpiRoutes);
 app.use('/api/clasificador', clasificadorRoutes);
 app.use('/api/presentacion', presentacionRoutes);
+app.use('/api/email', emailRoutes);
 
 // ── Error handler ─────────────────────────────────────────────────────────────
 app.use(errorHandler);
