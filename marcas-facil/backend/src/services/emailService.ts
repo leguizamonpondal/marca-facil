@@ -1057,21 +1057,59 @@ export async function mailPagoAcreditado(
  * Verifica toda la cadena —credenciales, entrega, render— con un contenido
  * inofensivo, antes de que un cliente real reciba algo mal armado.
  */
+/**
+ * Mail de prueba.
+ *
+ * ⚠️ Tiene que informar **el transporte que realmente se usó.** La primera
+ * versión decía "funcionan las credenciales SMTP" y mostraba
+ * `smtp.hostinger.com:465` incluso cuando el mail había salido por Resend:
+ * estaba escrita cuando SMTP era la única vía y no se actualizó al agregar la
+ * segunda.
+ *
+ * Un mail de prueba que miente sobre por dónde salió no es un diagnóstico, es
+ * ruido con formato de diagnóstico. Si el día de mañana alguien depura un
+ * problema de entregabilidad leyendo este mail, tiene que poder confiar en lo
+ * que dice.
+ */
 export function armarPrueba(): MailArmado {
+  const via = transporteCorreo();
+
+  const linea =
+    via === 'resend'
+      ? `Transporte: API HTTPS de Resend (puerto 443)`
+      : via === 'smtp'
+        ? `Transporte: SMTP — ${escapar(correo.smtp.host || '(sin configurar)')}:${correo.smtp.puerto}${
+            correo.smtp.seguro ? ' (SSL)' : ' (STARTTLS)'
+          }`
+        : `Transporte: ninguno (este mail no debería haber salido)`;
+
+  const dominio = correo.remitenteEmail.split('@')[1] || '';
+  const esDePrueba = /resend\.dev$/i.test(dominio);
+
   const contenido = `
 <p style="margin:0 0 16px;">Este es un mensaje de prueba del servicio de correo.</p>
-<p style="margin:0 0 16px;">Si lo estás leyendo, funcionan las credenciales SMTP, el envío y el diseño.</p>
+<p style="margin:0 0 16px;">Si lo estás leyendo, funcionan el transporte, el envío y el diseño.</p>
 
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:20px 0;border:1px solid #e5e5e5;border-radius:6px;">
   <tr><td style="padding:16px 20px;font-size:13px;font-family:monospace;color:#444;line-height:1.8;">
+    ${linea}<br>
     Remitente: ${escapar(correo.remitenteEmail)}<br>
     Responder a: ${escapar(correo.responderA)}<br>
-    Servidor: ${escapar(correo.smtp.host || '(sin configurar)')}:${correo.smtp.puerto}${correo.smtp.seguro ? ' (SSL)' : ' (STARTTLS)'}<br>
     Marca: ${escapar(marca.nombre)}
   </td></tr>
 </table>
 
-${aviso('Revisá que este mail no haya caído en correo no deseado. Si cayó, hay que ajustar los registros SPF y DKIM del dominio.')}`;
+${
+  esDePrueba
+    ? aviso(
+        'Este envío salió desde la dirección de pruebas de Resend, no desde el dominio propio. ' +
+          'Solo llega a la casilla dueña de la cuenta y no sirve para medir entregabilidad: ' +
+          'para eso hay que verificar el dominio y quitar MAIL_FROM_EMAIL.'
+      )
+    : aviso(
+        'Revisá que este mail no haya caído en correo no deseado. Si cayó, hay que revisar los registros SPF, DKIM y DMARC del dominio.'
+      )
+}`;
 
   return { asunto: `Prueba de correo — ${marca.nombre}`, html: plantilla(contenido, 'Prueba de correo') };
 }
