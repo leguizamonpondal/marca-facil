@@ -18,9 +18,14 @@
  *    trámite sigue estando bien hecho. Las funciones devuelven un resultado
  *    con `ok: false` en vez de lanzar excepción, y el llamador decide.
  *
- * 3. **Sin SMTP configurado, no falla: registra.** En desarrollo escribe el
- *    mail en el log y sigue. Así se puede trabajar en todo el circuito sin
+ * 3. **Sin transporte configurado, no falla: registra.** En desarrollo escribe
+ *    el mail en el log y sigue. Así se puede trabajar en todo el circuito sin
  *    tener credenciales de correo a mano.
+ *
+ *    Hay dos transportes y los elige `transporteCorreo()`: la API HTTPS de
+ *    Resend, o SMTP por Nodemailer. Resend tiene prioridad porque es la única
+ *    que funciona en el plan actual de Railway, que bloquea el SMTP saliente.
+ *    Las plantillas no saben cuál se usó — llaman a `enviarMail()` y nada más.
  *
  * 4. **HTML de correo, no HTML de web.** Tablas, estilos en línea, ancho fijo
  *    de 600px. Outlook sigue usando el motor de Word para renderizar: flexbox,
@@ -28,7 +33,15 @@
  */
 import nodemailer, { type Transporter } from 'nodemailer';
 import { logger } from '../utils/logger';
-import { marca, agente, correo, correoConfigurado, pieLegal } from './../utils/identidad';
+import {
+  marca,
+  agente,
+  correo,
+  correoConfigurado,
+  transporteCorreo,
+  pieLegal,
+  type TransporteCorreo,
+} from './../utils/identidad';
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -41,17 +54,39 @@ export interface AdjuntoMail {
 export interface ResultadoEnvio {
   ok: boolean;
   messageId?: string;
-  /** true cuando no había SMTP configurado y solo se registró en el log. */
+  /** true cuando no había transporte configurado y solo se registró en el log. */
   simulado?: boolean;
+  /** Por dónde salió (o iba a salir) el mail. Útil al depurar. */
+  transporte?: TransporteCorreo;
   error?: string;
+  /** Solo en la verificación por Resend: estado de los dominios de la cuenta. */
+  dominios?: Array<{ nombre: string; estado: string }>;
 }
 
 // ── Transporte ───────────────────────────────────────────────────────────────
+//
+// Dos vías, elegidas por `transporteCorreo()`:
+//
+//   · resend → POST a su API por HTTPS. Es la que funciona hoy: Railway bloquea
+//              el SMTP saliente en los planes Free, Trial y Hobby.
+//   · smtp   → Nodemailer. Queda por si el backend se muda a un VPS.
+//
+// El resto del archivo no sabe cuál se usó. Las ocho plantillas llaman a
+// `enviarMail()` y nada más; por eso este cambio no tocó ninguna.
+
+/**
+ * Base de la API. Configurable solo para poder apuntarla a un servidor de
+ * prueba local: la máquina donde se desarrolla no siempre tiene salida a
+ * api.resend.com, y el manejo de errores necesita probarse contra respuestas
+ * reales y no imaginadas.
+ */
+const API_RESEND = process.env.RESEND_API_URL || 'https://api.resend.com';
+const TIMEOUT_MS = 20_000;
 
 let transporter: Transporter | null = null;
 
 function obtenerTransporter(): Transporter | null {
-  if (!correoConfigurado()) return null;
+  if (transporteCorreo() !== 'smtp') return null;
   if (transporter) return transporter;
 
   transporter = nodemailer.createTransport({
@@ -60,34 +95,184 @@ function obtenerTransporter(): Transporter | null {
     secure: correo.smtp.seguro,
     auth: { user: correo.smtp.usuario, pass: correo.smtp.clave },
     // Los servidores de hosting compartido suelen tardar en el saludo inicial.
-    connectionTimeout: 20_000,
-    greetingTimeout: 20_000,
+    connectionTimeout: TIMEOUT_MS,
+    greetingTimeout: TIMEOUT_MS,
   });
 
   return transporter;
 }
 
 /**
- * Prueba la conexión SMTP sin mandar nada. Es lo primero que hay que correr
- * después de cargar las credenciales: distingue un problema de configuración
- * de un problema de contenido, que si no se confunden.
+ * Llamada a la API de Resend con timeout propio.
+ *
+ * Se usa `fetch`, que viene en Node 18+, a propósito: evita agregar una
+ * dependencia y con ella un `package.json` modificado. La entrega de archivos a
+ * este repositorio es manual por la interfaz de GitHub, así que cada archivo
+ * que se puede no tocar es un paso menos donde equivocarse.
+ */
+async function pedirAResend(
+  ruta: string,
+  init: { method: string; body?: unknown }
+): Promise<{ status: number; datos: any; esJson: boolean }> {
+  const control = new AbortController();
+  const reloj = setTimeout(() => control.abort(), TIMEOUT_MS);
+
+  try {
+    const r = await fetch(`${API_RESEND}${ruta}`, {
+      method: init.method,
+      headers: {
+        Authorization: `Bearer ${correo.resend.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: init.body ? JSON.stringify(init.body) : undefined,
+      signal: control.signal,
+    });
+
+    // Un 4xx de Resend trae el motivo en el cuerpo y hay que leerlo: distingue
+    // "la clave está mal" de "el dominio del remitente no está verificado", que
+    // son problemas distintos con soluciones distintas.
+    const texto = await r.text();
+    let datos: any = {};
+    let esJson = false;
+    try {
+      datos = texto ? JSON.parse(texto) : {};
+      esJson = true;
+    } catch {
+      datos = { message: texto.slice(0, 300) };
+    }
+    return { status: r.status, datos, esJson };
+  } finally {
+    clearTimeout(reloj);
+  }
+}
+
+/**
+ * Traduce el error a algo que se pueda leer y accionar.
+ *
+ * ⚠️ Lo primero que hace es preguntarse **si la respuesta vino de Resend.**
+ *
+ * No es paranoia: al probar esto, un proxy intermedio devolvió un 403 con el
+ * texto "Host not in allowlist", y la primera versión de esta función lo
+ * reportó como "Resend rechazó la credencial". Habría mandado a regenerar una
+ * API key perfectamente válida por un problema de red.
+ *
+ * Es el mismo error que ya apareció tres veces en este proyecto: tomar una
+ * respuesta cualquiera por la respuesta esperada. Un mensaje de error que
+ * atribuye la falla al lugar equivocado es peor que no tener mensaje.
+ */
+function explicarErrorResend(status: number, datos: any, esJson: boolean): string {
+  const motivo = String(datos?.message || datos?.name || 'sin detalle');
+
+  // Resend contesta siempre JSON con `message` y/o `name`. Cualquier otra cosa
+  // vino de un intermediario: un proxy, un firewall, un balanceador.
+  const deResend = esJson && (datos?.message !== undefined || datos?.name !== undefined);
+  const huellaDeProxy = /allowlist|egress|proxy|gateway|forbidden by|blocked/i.test(motivo);
+
+  if (!deResend || huellaDeProxy) {
+    return (
+      `La respuesta (${status}) no vino de Resend sino de un intermediario de red: ` +
+      `"${motivo.slice(0, 200)}". No es un problema de la API key ni del dominio: ` +
+      `algo entre el servidor y ${API_RESEND} está bloqueando la salida.`
+    );
+  }
+
+  // El orden importa: el dominio no verificado también responde 403, así que se
+  // evalúa por el contenido antes que por el código.
+  if (/not verified|verify a domain|domain.*not found/i.test(motivo)) {
+    return (
+      `Resend no acepta el remitente ${correo.remitenteEmail}: el dominio no está ` +
+      `verificado. Hay que cargar los registros DNS que da su panel, o poner ` +
+      `MAIL_FROM_EMAIL=onboarding@resend.dev para probar el circuito.`
+    );
+  }
+  if (/testing emails|own email address/i.test(motivo)) {
+    return (
+      `Resend solo permite mandar a la casilla dueña de la cuenta mientras no haya ` +
+      `un dominio verificado: ${motivo}`
+    );
+  }
+  if (status === 401) {
+    return `Resend rechazó la API key (401): ${motivo}. Generá otra en https://resend.com/api-keys.`;
+  }
+  if (status === 403) {
+    return `Resend denegó la operación (403): ${motivo}.`;
+  }
+  if (status === 422) {
+    return `Resend rechazó el contenido (422): ${motivo}.`;
+  }
+  if (status === 429) {
+    return `Resend está limitando la tasa de envío (429): ${motivo}.`;
+  }
+  if (status >= 500) {
+    return `Resend tuvo un error propio (${status}): ${motivo}. Conviene reintentar más tarde.`;
+  }
+  return `Resend respondió ${status}: ${motivo}`;
+}
+
+/**
+ * Prueba la salida sin mandar un mail. Es lo primero que hay que correr después
+ * de cargar las credenciales: distingue un problema de configuración de uno de
+ * contenido, que si no se confunden entre sí.
+ *
+ * Por Resend consulta los dominios de la cuenta. Eso valida la clave y además
+ * dice si el dominio del remitente está verificado — los dos motivos por los
+ * que un envío puede fallar antes de salir.
  */
 export async function verificarConexion(): Promise<ResultadoEnvio> {
-  const t = obtenerTransporter();
-  if (!t) {
+  const via = transporteCorreo();
+
+  if (via === 'ninguno') {
     return {
       ok: false,
+      transporte: 'ninguno',
       error:
-        'Faltan credenciales SMTP. Definir SMTP_HOST, SMTP_USER y SMTP_PASS en el entorno.',
+        'No hay transporte configurado. Definir RESEND_API_KEY, o bien SMTP_HOST, SMTP_USER y SMTP_PASS.',
     };
+  }
+
+  if (via === 'resend') {
+    try {
+      const { status, datos, esJson } = await pedirAResend('/domains', { method: 'GET' });
+
+      if (status >= 400) {
+        const error = explicarErrorResend(status, datos, esJson);
+        logger.error(`[Mail] Falló la verificación con Resend: ${error}`);
+        return { ok: false, transporte: 'resend', error };
+      }
+
+      const lista: any[] = Array.isArray(datos?.data) ? datos.data : [];
+      const dominios = lista.map((d) => ({
+        nombre: String(d?.name ?? '?'),
+        estado: String(d?.status ?? '?'),
+      }));
+
+      logger.info(
+        `[Mail] Resend verificado. Dominios: ${
+          dominios.map((d) => `${d.nombre}=${d.estado}`).join(', ') || '(ninguno)'
+        }`
+      );
+      return { ok: true, transporte: 'resend', dominios };
+    } catch (err: any) {
+      const error =
+        err?.name === 'AbortError'
+          ? `No hubo respuesta de ${API_RESEND} en ${TIMEOUT_MS / 1000} s.`
+          : err?.message || 'error desconocido';
+      logger.error(`[Mail] Falló la verificación con Resend: ${error}`);
+      return { ok: false, transporte: 'resend', error };
+    }
+  }
+
+  const t = obtenerTransporter();
+  if (!t) {
+    return { ok: false, transporte: 'smtp', error: 'Faltan credenciales SMTP.' };
   }
   try {
     await t.verify();
     logger.info(`[Mail] Conexión SMTP verificada contra ${correo.smtp.host}`);
-    return { ok: true };
+    return { ok: true, transporte: 'smtp' };
   } catch (err: any) {
     logger.error(`[Mail] Falló la verificación SMTP: ${err?.message}`);
-    return { ok: false, error: err?.message || 'error desconocido' };
+    return { ok: false, transporte: 'smtp', error: err?.message || 'error desconocido' };
   }
 }
 
@@ -100,16 +285,69 @@ export async function enviarMail(opts: {
   texto?: string;
   adjuntos?: AdjuntoMail[];
 }): Promise<ResultadoEnvio> {
-  const destinatarios = Array.isArray(opts.para) ? opts.para.join(', ') : opts.para;
-  const t = obtenerTransporter();
+  const lista = Array.isArray(opts.para) ? opts.para : [opts.para];
+  const destinatarios = lista.join(', ');
+  const via = transporteCorreo();
 
-  // Sin SMTP: se registra y se sigue. No es un error.
-  if (!t) {
+  // Sin transporte: se registra y se sigue. No es un error.
+  if (via === 'ninguno') {
     logger.warn(
-      `[Mail] SIN ENVIAR (falta configuración SMTP) → para: ${destinatarios} · asunto: "${opts.asunto}"` +
-        (opts.adjuntos?.length ? ` · adjuntos: ${opts.adjuntos.map((a) => a.nombre).join(', ')}` : '')
+      `[Mail] SIN ENVIAR (no hay transporte configurado) → para: ${destinatarios} · asunto: "${opts.asunto}"` +
+        (opts.adjuntos?.length
+          ? ` · adjuntos: ${opts.adjuntos.map((a) => a.nombre).join(', ')}`
+          : '')
     );
-    return { ok: true, simulado: true };
+    return { ok: true, simulado: true, transporte: 'ninguno' };
+  }
+
+  // Un mail sin versión de texto plano se ve mal en los clientes que no
+  // renderizan HTML y además puntúa peor en los filtros de spam.
+  const texto = opts.texto || textoDesdeHtml(opts.html);
+
+  if (via === 'resend') {
+    try {
+      const { status, datos, esJson } = await pedirAResend('/emails', {
+        method: 'POST',
+        body: {
+          from: `${correo.remitenteNombre} <${correo.remitenteEmail}>`,
+          to: lista,
+          reply_to: correo.responderA,
+          bcc: correo.copiaOculta ? [correo.copiaOculta] : undefined,
+          subject: opts.asunto,
+          html: opts.html,
+          text: texto,
+          attachments: opts.adjuntos?.map((a) => ({
+            filename: a.nombre,
+            // La API los recibe en base64, no como binario.
+            content: a.contenido.toString('base64'),
+            content_type: a.tipo || 'application/octet-stream',
+          })),
+        },
+      });
+
+      if (status >= 400) {
+        const error = explicarErrorResend(status, datos, esJson);
+        logger.error(`[Mail] Falló el envío a ${destinatarios}: ${error}`);
+        return { ok: false, transporte: 'resend', error };
+      }
+
+      const messageId = String(datos?.id ?? '');
+      logger.info(`[Mail] Enviado a ${destinatarios} por Resend: "${opts.asunto}" (${messageId})`);
+      return { ok: true, messageId, transporte: 'resend' };
+    } catch (err: any) {
+      // A propósito no se relanza: ver la decisión 2 en el encabezado.
+      const error =
+        err?.name === 'AbortError'
+          ? `No hubo respuesta de ${API_RESEND} en ${TIMEOUT_MS / 1000} s.`
+          : err?.message || 'error desconocido';
+      logger.error(`[Mail] Falló el envío a ${destinatarios}: ${error}`);
+      return { ok: false, transporte: 'resend', error };
+    }
+  }
+
+  const t = obtenerTransporter();
+  if (!t) {
+    return { ok: false, transporte: 'smtp', error: 'Faltan credenciales SMTP.' };
   }
 
   try {
@@ -120,9 +358,7 @@ export async function enviarMail(opts: {
       to: destinatarios,
       subject: opts.asunto,
       html: opts.html,
-      // Los clientes que no renderizan HTML muestran esto. Además, un mail sin
-      // versión de texto plano puntúa peor en los filtros de spam.
-      text: opts.texto || textoDesdeHtml(opts.html),
+      text: texto,
       attachments: opts.adjuntos?.map((a) => ({
         filename: a.nombre,
         content: a.contenido,
@@ -130,12 +366,12 @@ export async function enviarMail(opts: {
       })),
     });
 
-    logger.info(`[Mail] Enviado a ${destinatarios}: "${opts.asunto}" (${info.messageId})`);
-    return { ok: true, messageId: info.messageId };
+    logger.info(`[Mail] Enviado a ${destinatarios} por SMTP: "${opts.asunto}" (${info.messageId})`);
+    return { ok: true, messageId: info.messageId, transporte: 'smtp' };
   } catch (err: any) {
     // A propósito no se relanza: ver la decisión 2 en el encabezado.
     logger.error(`[Mail] Falló el envío a ${destinatarios}: ${err?.message}`);
-    return { ok: false, error: err?.message || 'error desconocido' };
+    return { ok: false, transporte: 'smtp', error: err?.message || 'error desconocido' };
   }
 }
 
