@@ -25,7 +25,7 @@ import {
   PLANTILLAS,
   type NombrePlantilla,
 } from '../../services/emailService';
-import { marca, agente, correo, correoConfigurado } from '../../utils/identidad';
+import { marca, agente, correo, correoConfigurado, transporteCorreo } from '../../utils/identidad';
 
 const router = Router();
 
@@ -50,8 +50,20 @@ function exigirToken(req: Request, res: Response): boolean {
 router.get('/config', (req: Request, res: Response) => {
   if (!exigirToken(req, res)) return;
 
+  const via = transporteCorreo();
+
   return res.json({
     listoParaEnviar: correoConfigurado(),
+    // Lo primero que hay que leer: por dónde va a salir el mail. Sin este dato
+    // se depura a ciegas — es lo que costó la sesión del 21/09, cuando el SMTP
+    // estaba bien configurado y el bloqueo era del plan de Railway.
+    transporte: via,
+    transporteDetalle:
+      via === 'resend'
+        ? 'API HTTPS de Resend (puerto 443). Es la vía que funciona en Railway Hobby.'
+        : via === 'smtp'
+          ? '⚠️ SMTP por Nodemailer. Railway bloquea el SMTP saliente en Free, Trial y Hobby: si el plan es Hobby esto va a fallar con "Connection timeout" a los 20 s. Cargar RESEND_API_KEY.'
+          : '❌ Ninguno. Los mails se registran en el log y no salen.',
     identidad: {
       marca: marca.nombre,
       razonSocial: marca.razonSocial,
@@ -67,17 +79,34 @@ router.get('/config', (req: Request, res: Response) => {
       remitente: `${correo.remitenteNombre} <${correo.remitenteEmail}>`,
       responderA: correo.responderA,
       copiaOculta: correo.copiaOculta || '(ninguna)',
-      servidor: correo.smtp.host || '❌ FALTA SMTP_HOST',
+    },
+    resend: {
+      claveCargada: correo.resend.apiKey
+        ? `sí (${correo.resend.apiKey.length} caracteres, empieza con "${correo.resend.apiKey.slice(0, 3)}")`
+        : 'no (falta RESEND_API_KEY)',
+      // El remitente tiene que pertenecer a un dominio verificado en Resend.
+      // Es el segundo motivo de falla más común, después de la clave.
+      dominioDelRemitente: correo.remitenteEmail.split('@')[1] || '(?)',
+      comoVerificar:
+        'GET /api/email/verificar dice si ese dominio está verificado en la cuenta.',
+    },
+    smtp: {
+      servidor: correo.smtp.host || '(sin configurar)',
       puerto: correo.smtp.puerto,
       modo: correo.smtp.seguro ? 'SSL directo (465)' : 'STARTTLS (587)',
-      usuario: correo.smtp.usuario || '❌ FALTA SMTP_USER',
+      usuario: correo.smtp.usuario || '(sin configurar)',
       claveCargada: correo.smtp.clave
         ? `sí (${correo.smtp.clave.length} caracteres)`
-        : '❌ FALTA SMTP_PASS',
+        : 'no',
+      estado:
+        via === 'smtp'
+          ? 'EN USO'
+          : 'en reserva (no se usa mientras haya RESEND_API_KEY)',
     },
-    nota:
-      'Si el puerto es 465 el modo tiene que ser SSL (SMTP_SECURE=true). Si es 587, STARTTLS (SMTP_SECURE=false). ' +
-      'Cruzarlos es el error más común y falla de formas poco informativas.',
+    notas: [
+      'La clave se muestra solo por su largo, nunca su valor. Sirve para detectar el error clásico de haberla pegado con un espacio.',
+      'SMTP: si el puerto es 465 el modo tiene que ser SSL (SMTP_SECURE=true); si es 587, STARTTLS (SMTP_SECURE=false). Cruzarlos falla de formas poco informativas.',
+    ],
   });
 });
 
@@ -90,19 +119,32 @@ router.get('/verificar', async (req: Request, res: Response) => {
 
   const inicio = Date.now();
   const r = await verificarConexion();
+  const via = transporteCorreo();
+
+  // La ayuda tiene que corresponder al transporte que falló. Mezclarlas manda a
+  // revisar puertos SMTP cuando el problema es una clave de Resend.
+  const ayuda =
+    r.ok || via === 'resend'
+      ? [
+          'Si la clave es inválida, generá otra en https://resend.com/api-keys y volvé a cargar RESEND_API_KEY.',
+          `El remitente es ${correo.remitenteEmail}: su dominio tiene que figurar abajo como "verified".`,
+          'Mientras el dominio no esté verificado, se puede probar el circuito con MAIL_FROM_EMAIL=onboarding@resend.dev (solo llega a la casilla dueña de la cuenta).',
+        ]
+      : [
+          '⚠️ Railway bloquea el SMTP saliente en los planes Free, Trial y Hobby: en Hobby esto falla con "Connection timeout" a los 20 s sin importar la configuración. La salida es cargar RESEND_API_KEY.',
+          'Revisá que el hosting permita SMTP saliente desde fuera de su red.',
+          'Probá el otro puerto: si estás en 587 pasá a 465 con SMTP_SECURE=true, o al revés.',
+          'El usuario suele ser la dirección completa, no solo la parte antes del arroba.',
+        ];
 
   return res.status(r.ok ? 200 : 502).json({
     ...r,
     latenciaMs: Date.now() - inicio,
-    servidor: `${correo.smtp.host}:${correo.smtp.puerto}`,
-    ayuda: r.ok
+    destino:
+      via === 'resend' ? 'api.resend.com (HTTPS)' : `${correo.smtp.host}:${correo.smtp.puerto}`,
+    ayuda: r.ok && via === 'resend' && r.dominios?.some((d) => d.estado === 'verified')
       ? undefined
-      : [
-          'Revisá que el hosting permita SMTP saliente desde fuera de su red.',
-          'Probá el otro puerto: si estás en 587 pasá a 465 con SMTP_SECURE=true, o al revés.',
-          'El usuario suele ser la dirección completa, no solo la parte antes del arroba.',
-          'Algunos hostings piden habilitar el acceso SMTP externo desde su panel.',
-        ],
+      : ayuda,
   });
 });
 
@@ -124,7 +166,9 @@ router.get('/prueba', async (req: Request, res: Response) => {
     return res.json({
       ok: true,
       simulado: true,
-      aviso: 'No hay SMTP configurado: el mail se registró en el log pero NO se envió.',
+      aviso:
+        'No hay transporte configurado: el mail se registró en el log pero NO se envió. ' +
+        'Cargar RESEND_API_KEY en el entorno.',
     });
   }
 
