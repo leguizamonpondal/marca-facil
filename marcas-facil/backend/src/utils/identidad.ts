@@ -110,6 +110,30 @@ export const correo = {
   /** Copia oculta de cada envío, para tener registro de lo que salió. */
   copiaOculta: process.env.MAIL_BCC || '',
 
+  /**
+   * Resend — envío por API HTTPS.
+   *
+   * ── Por qué existe esta segunda vía (22/09/2026) ──────────────────────────
+   *
+   * El SMTP de Hostinger quedó configurado y correcto, y aun así falló con
+   * "Connection timeout" a los 20 segundos exactos. La causa no estaba en la
+   * configuración: **Railway bloquea todo el SMTP saliente en los planes Free,
+   * Trial y Hobby** (puertos 25, 465, 587 y 2525), y solo lo habilita en Pro.
+   * Está documentado por ellos y es deliberado, para prevenir spam.
+   *
+   * Resend manda por HTTPS sobre el puerto 443, que ningún plan bloquea. Y de
+   * paso resuelve algo que el SMTP de un hosting compartido no puede: SPF y
+   * DKIM firmados con el dominio propio. Acá eso no es cosmético — el mail del
+   * volante lleva un VEP con fecha de vencimiento. Si cae en spam, el cliente
+   * no paga, el VEP se vence y el trámite se cae.
+   *
+   * El SMTP se conserva como alternativa: si algún día el backend se muda a un
+   * VPS donde el puerto 587 esté abierto, basta con borrar RESEND_API_KEY.
+   */
+  resend: {
+    apiKey: process.env.RESEND_API_KEY || '',
+  },
+
   smtp: {
     host: process.env.SMTP_HOST || '',
     puerto: Number(process.env.SMTP_PORT || 587),
@@ -125,9 +149,25 @@ export const correo = {
   },
 };
 
+/** Las dos formas de sacar un mail a la calle, más la de no poder. */
+export type TransporteCorreo = 'resend' | 'smtp' | 'ninguno';
+
+/**
+ * Qué vía se va a usar realmente.
+ *
+ * Resend tiene prioridad porque es la única que funciona en el plan actual de
+ * Railway. El orden no es una preferencia estética: con SMTP bloqueado, elegir
+ * SMTP es elegir que no salga nada.
+ */
+export function transporteCorreo(): TransporteCorreo {
+  if (correo.resend.apiKey) return 'resend';
+  if (correo.smtp.host && correo.smtp.usuario && correo.smtp.clave) return 'smtp';
+  return 'ninguno';
+}
+
 /** ¿Hay configuración suficiente para enviar de verdad? */
 export function correoConfigurado(): boolean {
-  return Boolean(correo.smtp.host && correo.smtp.usuario && correo.smtp.clave);
+  return transporteCorreo() !== 'ninguno';
 }
 
 // ── Textos que cambian con la identidad ──────────────────────────────────────
