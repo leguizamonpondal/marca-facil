@@ -52,6 +52,7 @@ import {
   obtenerGrillaCruda,
   type EstadoTramite,
 } from '../../services/portalPresentacionService';
+import { agente } from '../../utils/identidad';
 
 const router = Router();
 
@@ -181,7 +182,10 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
     solicitantes: [
       {
         tipoPersona: 'A',            // A = agente
-        nroSolicitante: 1974,        // matrícula de Agente de la Propiedad Industrial
+        // Matrícula de Agente de la Propiedad Industrial. Sale de
+        // utils/identidad para que el día que presente la SAS con otra
+        // matrícula no quede un número viejo enterrado acá.
+        nroSolicitante: agente.numero,
         poderInscriptivo: 'NO',      // el poder especial no está inscripto en el INPI
         aceptaFacultades: true,
         email: emailAgente,
@@ -217,10 +221,10 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
 
     marca.representantes = [
       {
-        nombre: 'HONORIO MARTINIANO LEGUIZAMON PONDAL',
+        nombre: agente.nombre.toUpperCase(),
         idTipoPJuridica: 63,                 // 63 = Apoderado Especial
         cuitGestor: String(process.env.INPI_WS_CUIT || '').replace(/\D/g, ''),
-        agenteRepresentante: 1974,
+        agenteRepresentante: agente.numero,
         aceptaFacultades: 1,
         poderInscripto: false,               // el poder especial no se inscribe en el INPI
         lugarDeCelebracion: 'Ciudad Autónoma de Buenos Aires',
@@ -236,7 +240,7 @@ router.get('/prueba-carga', async (req: Request, res: Response) => {
       modo: 'dry-run',
       aviso: 'No se envió nada al INPI. Agregá &enviar=true para cargar de verdad.',
       queSeVaAProbar: marca.representantes?.length
-        ? 'Si el nodo Representantes (Apoderado Especial, cod. 63 + agente 1974) hace que la sección REPRESENTACION del formulario impreso deje de decir "Sin datos".'
+        ? `Si el nodo Representantes (Apoderado Especial, cod. 63 + agente ${agente.numero}) hace que la sección REPRESENTACION del formulario impreso deje de decir "Sin datos".`
         : 'Titular con CUIT distinto al del usuario del WS + Honorio solo en Solicitantes (repite la prueba 4107717).',
       credenciales: {
         INPI_WS_CUIT: process.env.INPI_WS_CUIT ? 'seteada' : '❌ FALTA',
