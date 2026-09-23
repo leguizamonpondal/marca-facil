@@ -11,7 +11,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { prisma } from '../db/client';
 import { logger } from '../utils/logger';
-import { esConfundible, addCalendarDays } from '../utils/helpers';
+import { esConfundible } from '../utils/helpers';
+import { vencimientoOposicion, vencimientoLegible, diasHastaVencimiento } from '../utils/plazos';
 import { notificacionService } from './notificacionService';
 
 export const boletinService = {
@@ -69,7 +70,17 @@ export const boletinService = {
     });
 
     let alertasGeneradas = 0;
-    const plazoOposicion = addCalendarDays(fecha, 31); // 30 días corridos desde DÍA SIGUIENTE
+
+    // 30 días corridos desde el día siguiente a la publicación, hasta las
+    // 23:59 argentinas del último día. Caiga donde caiga, vence: no se corre
+    // al hábil siguiente. Criterio confirmado por el matriculado el
+    // 23/09/2026. La cuenta vive en utils/plazos.ts, donde está explicada.
+    //
+    // ⚠️ Acá decía `addCalendarDays(fecha, 31)`, un día de más: le habría
+    //    avisado al cliente que tenía tiempo hasta el día después del
+    //    vencimiento real.
+    const plazoOposicion = vencimientoOposicion(fecha);
+    const vencimientoTexto = vencimientoLegible(plazoOposicion);
 
     for (const entrada of entradasNuevas) {
       for (const marcaVigilada of marcasVigiladas) {
@@ -133,7 +144,8 @@ export const boletinService = {
               `"${entrada.denominacion}" (Acta ${entrada.acta}, Clase ${entrada.claseNiza}) ` +
               `por ${entrada.titularNombre}, que es confundible con tu marca ` +
               `"${marcaVigilada.denominacion}" (similitud ${similitud}%). ` +
-              `Plazo para oponerse: ${plazoOposicion.toLocaleDateString('es-AR')}.`,
+              `Plazo para oponerse: hasta el ${vencimientoTexto} a las 23:59 ` +
+              `(${diasHastaVencimiento(plazoOposicion)} días corridos).`,
             urgente: true,
             marcaId: marcaVigilada.id,
             oposicionId: oposicion.id,

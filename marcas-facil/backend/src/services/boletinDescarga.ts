@@ -131,6 +131,17 @@ export async function descargarBoletinesDeLaFecha(
     );
   }
 
+  // ── Control 2 bis ──────────────────────────────────────────────────────────
+  const saltados = await verificarContinuidad(publicados[0], dia);
+  huecos.push(...saltados);
+  if (saltados.length > 0) {
+    advertencias.push(
+      `Entre la última descarga y esta quedaron sin bajar: ${saltados.join(', ')}. ` +
+        'Son boletines que existieron y no se vigilaron — hay que recuperarlos por número. ' +
+        'El plazo de oposición de esas publicaciones ya está corriendo.'
+    );
+  }
+
   if (filas.length < 4) {
     advertencias.push(
       `Solo ${filas.length} boletines para el ${diaTexto}. Lo habitual son cuatro o cinco: ` +
@@ -264,6 +275,78 @@ async function yaSeDescargo(numero: string): Promise<boolean> {
 }
 
 // ── Control de numeración ────────────────────────────────────────────────────
+
+/**
+ * Control de continuidad ENTRE semanas.
+ *
+ * ── Por qué hace falta, además del control de huecos ───────────────────────
+ *
+ * `buscarHuecos()` mira la numeración dentro de una misma fecha. Eso deja
+ * pasar el caso peligroso: que el INPI publique un boletín más tarde, o que el
+ * listado no lo muestre, y la tanda del día se vea perfectamente consecutiva.
+ *
+ *   Semana pasada: 11122 … 11125
+ *   Esta semana:   11127 … 11130   ← el 11126 existió y nadie lo miró
+ *
+ * Dentro de cada fecha no hay ningún hueco. Todo sale bien. Y hay un boletín
+ * entero sin vigilar, con su plazo de 30 días corriendo.
+ *
+ * ── Por qué el control es válido ───────────────────────────────────────────
+ *
+ * La serie de MARCAS NUEVAS es estrictamente consecutiva: verificada del 11073
+ * al 11125, doce semanas seguidas sin un solo salto. Los otros tipos de
+ * boletín (resoluciones, caducidades, anexos) van en una numeración paralela
+ * —la serie `60xx`— así que no se intercalan.
+ *
+ * @returns los números que quedaron sin descargar, o `[]` si no hay ninguno
+ *          o si es la primera corrida.
+ */
+async function verificarContinuidad(primeroDeHoy: string, fecha: Date): Promise<string[]> {
+  const inicio = Number(primeroDeHoy);
+  if (!Number.isFinite(inicio)) return [];
+
+  let ultimo: number;
+  try {
+    // ⚠️ `boletinNumero` es String en el schema, así que este `desc` ordena
+    //    alfabéticamente, no numéricamente. Hoy da igual porque todos los
+    //    números tienen cinco dígitos (11xxx) y ahí las dos ordenaciones
+    //    coinciden. Dejaría de coincidir si la serie llegara a seis dígitos
+    //    —faltan unas 1.700 semanas— o si alguien cargara a mano un número de
+    //    largo distinto.
+    const previo = await prisma.boletinDescarga.findFirst({
+      where: { exitosa: true, fechaBoletin: { lt: fecha } },
+      orderBy: { boletinNumero: 'desc' },
+      select: { boletinNumero: true },
+    });
+    if (!previo?.boletinNumero) return []; // primera corrida: no hay con qué comparar
+    ultimo = Number(previo.boletinNumero);
+    if (!Number.isFinite(ultimo)) return [];
+  } catch (err: any) {
+    // Sin el dato previo no se puede afirmar continuidad. Se avisa en el log y
+    // no se inventa un resultado tranquilizador.
+    logger.warn(`[Boletín] No se pudo verificar la continuidad entre semanas: ${err.message}`);
+    return [];
+  }
+
+  if (inicio <= ultimo + 1) return []; // consecutivo, o repetido
+
+  const faltantes: string[] = [];
+  for (let n = ultimo + 1; n < inicio; n++) faltantes.push(String(n));
+
+  // Un salto enorme no es un hueco real: es una base recién creada, una
+  // importación, o un cambio de serie del INPI. Avisar de 400 boletines
+  // faltantes sería ruido que tapa el caso verdadero, que es de uno o dos.
+  if (faltantes.length > 12) {
+    logger.warn(
+      `[Boletín] Salto de ${faltantes.length} números entre ${ultimo} y ${inicio}. ` +
+        'Es demasiado para un hueco real; probablemente la base no tenga el historial ' +
+        'completo. No se reporta como faltante.'
+    );
+    return [];
+  }
+
+  return faltantes;
+}
 
 /**
  * Devuelve los números que faltan entre el primero y el último.
