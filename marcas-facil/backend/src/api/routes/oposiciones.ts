@@ -1,5 +1,5 @@
 /**
- * Rutas de Oposiciones — MARCAS FÁCIL
+ * Rutas de Oposiciones — MARCA FÁCIL
  *
  * Flujo según Resolución INPI 297/2026 (vigente para marcas desde 01/03/2026):
  * 1. Detección automática vía boletín → Oposición formulada (Art. 1: 30 días corridos)
@@ -18,6 +18,7 @@ import { AppError } from '../../middleware/errorHandler';
 import { authenticate, AuthRequest } from '../../middleware/auth';
 import { documentoService } from '../../services/documentoService';
 import { addBusinessDays, addCalendarDays } from '../../utils/helpers';
+import { vencimientoOposicion, vencimientoLegible } from '../../utils/plazos';
 import { logger } from '../../utils/logger';
 
 const router = Router();
@@ -102,11 +103,20 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
     if (!marcaOponente) throw new AppError(404, 'Marca propia no encontrada', 'MARCA_NOT_FOUND');
 
     const fechaPublicacion = new Date(data.fechaPublicacion);
-    // Plazo de oposición: 30 días corridos desde el día SIGUIENTE a la publicación
-    const plazoOposicion = addCalendarDays(fechaPublicacion, 31);
+
+    // 30 días corridos desde el día siguiente a la publicación, hasta las 23:59
+    // argentinas. Acá decía `addCalendarDays(fechaPublicacion, 31)`, un día de
+    // más — el mismo error que había en boletinService. La cuenta y su
+    // fundamento están en utils/plazos.ts.
+    const plazoOposicion = vencimientoOposicion(fechaPublicacion);
+    const venceTexto = vencimientoLegible(plazoOposicion);
 
     if (new Date() > plazoOposicion) {
-      throw new AppError(400, `El plazo de 30 días para oponerse venció el ${plazoOposicion.toLocaleDateString('es-AR')}`, 'PLAZO_VENCIDO');
+      throw new AppError(
+        400,
+        `El plazo de 30 días corridos para oponerse venció el ${venceTexto} a las 23:59`,
+        'PLAZO_VENCIDO'
+      );
     }
 
     const op = await prisma.oposicion.create({
@@ -132,7 +142,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
         marcaId: data.marcaOponenteId,
         oposicionId: op.id,
         tipo: 'OPOSICION_PLAZO',
-        titulo: `Oposición acta ${data.actaOpuesta} — Presentar antes del ${plazoOposicion.toLocaleDateString('es-AR')}`,
+        titulo: `Oposición acta ${data.actaOpuesta} — Presentar antes del ${venceTexto} a las 23:59`,
         descripcion: `Oposición a "${data.denominacionOpuesta}" Clase ${data.claseOpuesta}`,
         fechaVencimiento: plazoOposicion,
         fechaAlerta: addCalendarDays(plazoOposicion, -5),
