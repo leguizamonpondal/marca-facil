@@ -1,5 +1,5 @@
 /**
- * Rutas del Boletín de Marcas — MARCAS FÁCIL
+ * Rutas del Boletín de Marcas — MARCA FÁCIL
  * Boletín publicado todos los MIÉRCOLES por el INPI
  */
 
@@ -9,9 +9,140 @@ import { prisma } from '../../db/client';
 import { AppError } from '../../middleware/errorHandler';
 import { authenticate, requirePlan, AuthRequest } from '../../middleware/auth';
 import { boletinService } from '../../services/boletinService';
+import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles } from '../../services/boletinPortal';
+import { descargarBoletinesDeLaFecha, limpiar as limpiarTemporales } from '../../services/boletinDescarga';
 import { logger } from '../../utils/logger';
 
 const router = Router();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIAGNÓSTICO DEL PORTAL — temporal
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Dos GET protegidos con INPI_TEST_TOKEN, para poder probar el descubrimiento
+// y la descarga desde el navegador sin armar un JWT.
+//
+// ⚠️ Van a la misma lista de limpieza que /api/inpi/prueba-carga y los atajos
+//    GET del portal: antes de abrir la app hay que pasarlos a `authenticate`
+//    o borrarlos. Quedan declarados ANTES de `router.use(authenticate)`, así
+//    que no están detrás del login.
+
+function exigirToken(req: any, res: Response): boolean {
+  const esperado = process.env.INPI_TEST_TOKEN || '';
+  if (!esperado) {
+    res.status(503).json({ error: 'Endpoint deshabilitado', detalle: 'Falta INPI_TEST_TOKEN.' });
+    return false;
+  }
+  if (String(req.query.token || '') !== esperado) {
+    res.status(403).json({ error: 'Token inválido' });
+    return false;
+  }
+  return true;
+}
+
+// ── GET /api/boletin/portal/listado ──────────────────────────────────────────
+//
+// Qué boletines ve el portal. No descarga nada: es la consulta barata que
+// conviene correr primero.
+//
+//   ?fecha=2026-09-16   → los de MARCAS NUEVAS de ese miércoles
+//   (sin fecha)         → los del último miércoles
+//   ?todos=1            → el listado crudo, con resoluciones y anexos incluidos
+router.get('/portal/listado', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const inicio = Date.now();
+  try {
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : ultimoMiercoles();
+
+    if (isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-16' });
+    }
+
+    if (req.query.todos) {
+      const filas = await listarBoletines();
+      return res.json({
+        aviso: 'Listado crudo: últimos 100 registros del sector Marcas, de todos los tipos.',
+        total: filas.length,
+        filas,
+      });
+    }
+
+    const filas = await boletinesDeMarcasNuevas(fecha);
+
+    return res.json({
+      fecha: fecha.toLocaleDateString('es-AR'),
+      cantidad: filas.length,
+      numeros: filas.map((f) => f.numero),
+      esperado: 'Entre 4 y 5 por miércoles. Menos de 4 amerita mirar el portal a mano.',
+      latenciaMs: Date.now() - inicio,
+      filas,
+    });
+  } catch (err: any) {
+    // Se responde 502 y no 200 con lista vacía: no poder mirar el Boletín no
+    // puede parecerse a haberlo mirado y no encontrar nada.
+    logger.error(`[Boletín] Falló el listado: ${err.message}`);
+    return res.status(502).json({
+      error: 'No se pudo consultar el portal del INPI',
+      detalle: err.message,
+      latenciaMs: Date.now() - inicio,
+    });
+  }
+});
+
+// ── GET /api/boletin/portal/descargar ────────────────────────────────────────
+//
+// Descarga real de los 4-5 PDF y verificación de completitud. Tarda: son unos
+// 100 MB. Los PDF se borran al terminar; lo que queda es el registro en
+// boletin_descargas y este informe.
+//
+//   ?fecha=2026-09-16   ?forzar=1 (vuelve a bajar los ya descargados)
+router.get('/portal/descargar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const inicio = Date.now();
+  let resultado: Awaited<ReturnType<typeof descargarBoletinesDeLaFecha>> | undefined;
+
+  try {
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : undefined;
+    if (fecha && isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-16' });
+    }
+
+    resultado = await descargarBoletinesDeLaFecha(fecha, { forzar: Boolean(req.query.forzar) });
+
+    return res.status(resultado.completa ? 200 : 207).json({
+      completa: resultado.completa,
+      veredicto: resultado.completa
+        ? `Se descargaron los ${resultado.publicados.length} boletines del ${resultado.fecha.toLocaleDateString('es-AR')}.`
+        : '⚠️ La descarga está INCOMPLETA. No se puede dar la vigilancia de esta fecha por cerrada.',
+      fecha: resultado.fecha.toLocaleDateString('es-AR'),
+      publicados: resultado.publicados,
+      descargados: resultado.descargados.map((d) => ({
+        numero: d.numero,
+        tamanoMb: d.tamanoMb,
+        comentario: d.comentario,
+      })),
+      fallidos: resultado.fallidos,
+      huecos: resultado.huecos,
+      advertencias: resultado.advertencias,
+      latenciaMs: Date.now() - inicio,
+      siguientePaso:
+        'Falta el parser: los PDF se bajan, se verifican y se borran. Las actas todavía no se extraen.',
+    });
+  } catch (err: any) {
+    logger.error(`[Boletín] Falló la descarga: ${err.message}`);
+    return res.status(502).json({
+      error: 'No se pudieron descargar los boletines',
+      detalle: err.message,
+      latenciaMs: Date.now() - inicio,
+    });
+  } finally {
+    // Siempre, incluso si algo explotó: son ~100 MB de temporales.
+    if (resultado) limpiarTemporales(resultado);
+  }
+});
+
 router.use(authenticate);
 
 // ── GET /api/boletin — Listar boletines descargados ──────────────────────────
@@ -83,10 +214,12 @@ router.get('/entradas', async (req: AuthRequest, res: Response, next: NextFuncti
     if (titular) {
       where.titularNombre = { contains: String(titular), mode: 'insensitive' };
     }
+    // El campo del schema es `fechaBoletin`. Decía `fechaPublicacion`, que no
+    // existe en BoletinEntrada: filtrar por fecha tiraba en tiempo de ejecución.
     if (desde || hasta) {
-      where.fechaPublicacion = {};
-      if (desde) where.fechaPublicacion.gte = new Date(String(desde));
-      if (hasta) where.fechaPublicacion.lte = new Date(String(hasta));
+      where.fechaBoletin = {};
+      if (desde) where.fechaBoletin.gte = new Date(String(desde));
+      if (hasta) where.fechaBoletin.lte = new Date(String(hasta));
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -137,7 +270,7 @@ router.post('/carga-manual',
 
       const { datos } = schema.parse(req.body);
 
-      // Mapear fechaPublicacion → boletinFecha para el servicio (nombre en schema)
+      // Mapear fechaPublicacion → fechaBoletin, que es el nombre del schema.
       const datosConFecha = datos.map(d => ({
         acta: d.acta,
         denominacion: d.denominacion,
@@ -146,7 +279,7 @@ router.post('/carga-manual',
         titularNombre: d.titularNombre || 'No informado',
         titularCuit: d.titularCuit,
         productos: d.productos,
-        boletinFecha: new Date(d.fechaPublicacion),
+        fechaBoletin: new Date(d.fechaPublicacion),
       }));
 
       const resultado = await boletinService.cargarManual(datosConFecha);
