@@ -7,7 +7,6 @@
  * Ref: PresentacionOposicion_JUL26.pdf + Resolución INPI 297/2026
  */
 
-import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import { prisma } from '../db/client';
@@ -15,97 +14,31 @@ import { logger } from '../utils/logger';
 import { esConfundible, addCalendarDays } from '../utils/helpers';
 import { notificacionService } from './notificacionService';
 
-// URL base del Boletín de Marcas INPI
-const BOLETIN_BASE_URL = 'https://portaltramites.inpi.gob.ar/boletin';
-const UPLOADS_DIR = path.join(process.cwd(), 'uploads', 'boletines');
-
 export const boletinService = {
 
   /**
-   * Descarga el boletín del miércoles correspondiente.
-   * Puede recibir una fecha específica (para re-procesar) o tomar el último miércoles.
+   * ⛔ RETIRADA — 23/09/2026.
+   *
+   * Esta función descargaba "el" boletín del miércoles desde una URL inventada
+   * (`/boletin/{año}/boletin-{YYYYMMDD}.pdf`, que no existe) y daba la semana
+   * por vigilada con un solo archivo. Tres suposiciones, ninguna verificada:
+   * la URL, el formato del PDF y que hubiera un boletín por semana. Son cuatro
+   * o cinco.
+   *
+   * La reemplaza `descargarBoletinesDeLaFecha()` en `boletinDescarga.ts`, que
+   * descubre los boletines en el portal, los baja todos y verifica que estén
+   * todos.
+   *
+   * Se deja tirando en lugar de borrarla porque el scheduler viejo puede
+   * seguir llamándola: es preferible un error ruidoso a una vigilancia que
+   * parece correr y no mira nada.
    */
-  async descargarBoletin(fecha?: Date): Promise<{ exitosa: boolean; totalActas: number; error?: string }> {
-    const fechaBoletin = fecha || getUltimoMiercoles();
-    const fechaStr = fechaBoletin.toISOString().split('T')[0];
-
-    logger.info(`📰 Descargando Boletín de Marcas INPI: ${fechaStr}`);
-
-    // Crear directorio si no existe
-    if (!fs.existsSync(UPLOADS_DIR)) {
-      fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-    }
-
-    const registro = await prisma.boletinDescarga.create({
-      data: { fecha: fechaBoletin, exitosa: false },
-    });
-
-    try {
-      // El INPI publica el boletín en formato PDF accesible públicamente
-      // URL real: https://portaltramites.inpi.gob.ar/boletin/YYYY/boletin-YYYYMMDD.pdf
-      // También está disponible como lista de actas en formato estructurado
-      const url = `${BOLETIN_BASE_URL}/${fechaBoletin.getFullYear()}/boletin-${fechaStr.replace(/-/g, '')}.pdf`;
-
-      logger.info(`  URL: ${url}`);
-
-      const response = await axios.get(url, {
-        responseType: 'arraybuffer',
-        timeout: 60000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; MarcasFacil/1.0; +info@marcasfacil.com.ar)',
-        },
-      });
-
-      const pdfPath = path.join(UPLOADS_DIR, `boletin-${fechaStr}.pdf`);
-      fs.writeFileSync(pdfPath, response.data);
-      logger.info(`  ✅ PDF guardado: ${pdfPath}`);
-
-      // Parsear el PDF para extraer marcas nuevas
-      const marcas = await parsearBoletinPDF(pdfPath, fechaBoletin);
-      logger.info(`  📊 ${marcas.length} solicitudes encontradas en el boletín`);
-
-      // Guardar en base de datos (upsert para evitar duplicados)
-      let guardadas = 0;
-      for (const marca of marcas) {
-        try {
-          await prisma.boletinEntrada.upsert({
-            where: { acta: marca.acta },
-            create: {
-              boletinFecha: fechaBoletin,
-              acta: marca.acta,
-              denominacion: marca.denominacion,
-              tipoMarca: marca.tipoMarca,
-              claseNiza: marca.claseNiza,
-              titularNombre: marca.titularNombre,
-              titularCuit: marca.titularCuit,
-              productos: marca.productos,
-            },
-            update: {}, // Si ya existe, no actualizar
-          });
-          guardadas++;
-        } catch (err) {
-          // Silenciar duplicados individuales
-        }
-      }
-
-      await prisma.boletinDescarga.update({
-        where: { id: registro.id },
-        data: { exitosa: true, totalActas: guardadas, url },
-      });
-
-      return { exitosa: true, totalActas: guardadas };
-
-    } catch (err: any) {
-      const errorMsg = err.message || 'Error desconocido';
-      logger.error(`❌ Error descargando boletín ${fechaStr}: ${errorMsg}`);
-
-      await prisma.boletinDescarga.update({
-        where: { id: registro.id },
-        data: { exitosa: false, error: errorMsg },
-      });
-
-      return { exitosa: false, totalActas: 0, error: errorMsg };
-    }
+  async descargarBoletin(_fecha?: Date): Promise<never> {
+    throw new Error(
+      'boletinService.descargarBoletin() está retirada: usaba una URL inexistente y ' +
+        'asumía un boletín por semana cuando son cuatro o cinco. ' +
+        'Usar descargarBoletinesDeLaFecha() de services/boletinDescarga.ts.'
+    );
   },
 
   /**
@@ -118,7 +51,7 @@ export const boletinService = {
 
     // Obtener entradas del boletín sin procesar
     const entradasNuevas = await prisma.boletinEntrada.findMany({
-      where: { boletinFecha: fecha, procesado: false },
+      where: { fechaBoletin: fecha, procesado: false },
     });
 
     if (entradasNuevas.length === 0) {
@@ -235,7 +168,7 @@ export const boletinService = {
    * Carga manual de marcas del boletín (cuando el PDF no se puede parsear automáticamente)
    */
   async cargarManual(datos: {
-    boletinFecha: Date;
+    fechaBoletin: Date;
     acta: string;
     denominacion: string;
     tipoMarca: string;
