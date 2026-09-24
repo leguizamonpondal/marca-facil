@@ -14,6 +14,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles, descargarPdf } from '../../services/boletinPortal';
 import { extraerTextoDelPdf, parsearActas } from '../../services/boletinParser';
+import { cruzarBoletin, cruzarUnaMarca, indexarActas } from '../../services/vigilanciaService';
 import { descargarBoletinesDeLaFecha, limpiar as limpiarTemporales } from '../../services/boletinDescarga';
 import { logger } from '../../utils/logger';
 
@@ -243,6 +244,111 @@ router.get('/portal/parsear', async (req, res: Response) => {
       detalle: err.message,
       latenciaMs: Date.now() - inicio,
     });
+  }
+});
+
+// ── GET /api/boletin/vigilancia/probar ───────────────────────────────────────
+//
+// Cruza UNA denominación contra las actas ya guardadas, **sin escribir nada**.
+//
+// Es la herramienta de calibración: se van a probar decenas de marcas contra
+// los mismos datos, y crear una marca de prueba por cada intento ensuciaría la
+// base de producción con registros que después hay que acordarse de borrar.
+//
+//   ?marca=NAHANA&clase=35          — obligatorios
+//   &ampliada=1                     — vigilancia en las 45 clases
+//   &tipo=RENOMBRADA                — cambia el texto de la acción sugerida
+//   &fecha=2026-09-23               — por defecto, el último miércoles
+router.get('/vigilancia/probar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const inicio = Date.now();
+  try {
+    const denominacion = String(req.query.marca || '').trim();
+    const clase = Number(req.query.clase);
+
+    if (!denominacion || !Number.isFinite(clase) || clase < 1 || clase > 45) {
+      return res.status(400).json({
+        error: 'Faltan parámetros',
+        uso: '?marca=NAHANA&clase=35 [&ampliada=1] [&tipo=NOTORIA|RENOMBRADA] [&fecha=2026-09-23]',
+      });
+    }
+
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : ultimoMiercoles();
+    if (isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-23' });
+    }
+
+    const { total, sinDenominacion, porClase, advertencias } = await indexarActas(fecha);
+
+    const tipo = String(req.query.tipo || '').toUpperCase();
+    const r = cruzarUnaMarca(
+      {
+        id: '(prueba)',
+        denominacion,
+        claseNiza: clase,
+        vigilanciaAmpliada: Boolean(req.query.ampliada),
+        tipoNotoriedad: tipo === 'RENOMBRADA' || tipo === 'NOTORIA' ? (tipo as any) : null,
+      },
+      porClase
+    );
+
+    const ordenadas = r.coincidencias.sort((a, b) => b.similitud - a.similitud);
+
+    return res.json({
+      marca: denominacion,
+      clase,
+      alcance: req.query.ampliada ? 'las 45 clases (ampliada)' : 'clase idéntica + afines',
+      fecha: fecha.toLocaleDateString('es-AR'),
+      actasEnLaFecha: total,
+      actasCotejables: total - sinDenominacion,
+      comparaciones: r.comparaciones,
+      coincidencias: ordenadas.length,
+      porMotivo: {
+        afinidad: ordenadas.filter((c) => c.motivo === 'afinidad').length,
+        cuasiIdentidad: ordenadas.filter((c) => c.motivo === 'cuasi-identidad').length,
+      },
+      resultados: ordenadas.slice(0, 50),
+      hayMas: ordenadas.length > 50 ? ordenadas.length - 50 : 0,
+      advertencias,
+      aviso:
+        'Prueba en seco: no se creó ninguna oposición ni alerta. Los umbrales de ' +
+        'confundibilidad NO están calibrados todavía — esta lista es un borrador.',
+      latenciaMs: Date.now() - inicio,
+    });
+  } catch (err: any) {
+    logger.error(`[Vigilancia] Falló la prueba: ${err.message}`);
+    return res.status(502).json({ error: 'No se pudo cruzar', detalle: err.message });
+  }
+});
+
+// ── GET /api/boletin/vigilancia/cruzar ───────────────────────────────────────
+//
+// El cruce real: todas las marcas con vigilancia activa contra las actas de la
+// fecha. Tampoco escribe nada todavía — devuelve lo que encontraría.
+router.get('/vigilancia/cruzar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  try {
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : ultimoMiercoles();
+    if (isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-23' });
+    }
+
+    const r = await cruzarBoletin(fecha);
+
+    return res.json({
+      ...r,
+      fecha: r.fecha.toLocaleDateString('es-AR'),
+      coincidencias: r.coincidencias.slice(0, 100),
+      totalCoincidencias: r.coincidencias.length,
+      aviso:
+        'No se creó ninguna oposición ni alerta: esto muestra lo que el motor encontraría. ' +
+        'Los umbrales todavía no están calibrados.',
+    });
+  } catch (err: any) {
+    logger.error(`[Vigilancia] Falló el cruce: ${err.message}`);
+    return res.status(502).json({ error: 'No se pudo cruzar', detalle: err.message });
   }
 });
 
