@@ -100,7 +100,11 @@ router.get('/portal/listado', async (req, res: Response) => {
 // 100 MB. Los PDF se borran al terminar; lo que queda es el registro en
 // boletin_descargas y este informe.
 //
-//   ?fecha=2026-09-16   ?forzar=1 (vuelve a bajar los ya descargados)
+//   ?fecha=2026-09-16   — otra fecha
+//   ?forzar=1           — vuelve a bajar los ya descargados
+//   ?numero=11122       — UN boletín solo. Para probar a mano: los cuatro de
+//                         una fecha son ~150 MB y el proxy de Railway corta la
+//                         respuesta antes de que termine.
 router.get('/portal/descargar', async (req, res: Response) => {
   if (!exigirToken(req, res)) return;
 
@@ -113,7 +117,10 @@ router.get('/portal/descargar', async (req, res: Response) => {
       return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-16' });
     }
 
-    resultado = await descargarBoletinesDeLaFecha(fecha, { forzar: Boolean(req.query.forzar) });
+    resultado = await descargarBoletinesDeLaFecha(fecha, {
+      forzar: Boolean(req.query.forzar),
+      soloNumero: req.query.numero ? String(req.query.numero) : undefined,
+    });
 
     return res.status(resultado.completa ? 200 : 207).json({
       completa: resultado.completa,
@@ -125,14 +132,26 @@ router.get('/portal/descargar', async (req, res: Response) => {
       descargados: resultado.descargados.map((d) => ({
         numero: d.numero,
         tamanoMb: d.tamanoMb,
-        comentario: d.comentario,
+        actasLeidas: d.actasLeidas,
+        actasNuevas: d.actasNuevas,
+        actasRepetidas: d.actasRepetidas,
+        actasFallidas: d.actasFallidas,
+        sinDenominacion: d.sinDenominacion,
       })),
+      totales: {
+        actasLeidas: resultado.descargados.reduce((n, d) => n + d.actasLeidas, 0),
+        actasNuevas: resultado.descargados.reduce((n, d) => n + d.actasNuevas, 0),
+        actasFallidas: resultado.descargados.reduce((n, d) => n + d.actasFallidas, 0),
+        sinDenominacion: resultado.descargados.reduce((n, d) => n + d.sinDenominacion, 0),
+      },
       fallidos: resultado.fallidos,
       huecos: resultado.huecos,
       advertencias: resultado.advertencias,
       latenciaMs: Date.now() - inicio,
       siguientePaso:
-        'Falta el parser: los PDF se bajan, se verifican y se borran. Las actas todavía no se extraen.',
+        'Las actas quedaron guardadas en boletin_entradas. Las que figuran en ' +
+        '"sinDenominacion" son mixtas y figurativas: hay que pedirle la denominación ' +
+        'al Web Service del INPI por número de acta antes de poder cotejarlas.',
     });
   } catch (err: any) {
     logger.error(`[Boletín] Falló la descarga: ${err.message}`);
