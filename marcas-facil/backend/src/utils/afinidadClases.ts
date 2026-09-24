@@ -606,14 +606,30 @@ export function afinidadEntreClases(a: number, b: number): ResultadoAfinidad {
 /**
  * Todas las afinidades de una clase, incluidas las que solo sirven para
  * vigilar. **Esta es la que usa el motor de vigilancia.**
+ *
+ * ⚠️ Recorre los dos arreglos, y eso no es un detalle. Los pares de la clase
+ *    35 viven aparte, en `AFINIDAD_35_NO_VENTA`. Mientras esta función leía
+ *    solo `PARES_AFINIDAD`, `clasesAfinesA(35)` devolvía **cero**: una marca
+ *    de clase 35 se vigilaba únicamente contra su propia clase.
+ *
+ *    No es un caso de borde. La 35 es la clase más poblada del Boletín —161 de
+ *    999 actas en el boletín 11122— y es donde se registra buena parte de las
+ *    PyMEs: comercialización, e-commerce, administración de negocios.
+ *
+ * ⚠️ **Falta todavía la cara de venta de la clase 35.** Una marca que protege
+ *    "venta de indumentaria" en la 35 tendría que vigilarse contra la 25, y eso
+ *    no sale de ninguna tabla: hay que leer el campo (57) con
+ *    `alcanceDeLaVenta()`. Está pendiente, y hasta que se haga, un cliente de
+ *    clase 35 que vende ropa no ve lo que se publica en la 25.
  */
 export function clasesAfinesA(
   clase: number
 ): Array<{ clase: number; grado: GradoAfinidad; fundamento: string; soloVigilancia: boolean }> {
   const r: Array<{ clase: number; grado: GradoAfinidad; fundamento: string; soloVigilancia: boolean }> = [];
-  for (const p of PARES_AFINIDAD) {
+  for (const p of [...PARES_AFINIDAD, ...AFINIDAD_35_NO_VENTA]) {
     const otra = p.a === clase ? p.b : p.b === clase ? p.a : null;
     if (otra === null) continue;
+    if (r.some((x) => x.clase === otra)) continue; // por si un par estuviera en los dos
     r.push({ clase: otra, grado: p.grado, fundamento: p.fundamento, soloVigilancia: p.soloVigilancia === true });
   }
   const peso = { alta: 0, media: 1, baja: 2 };
