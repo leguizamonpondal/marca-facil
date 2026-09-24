@@ -13,6 +13,7 @@ import { prisma } from './db/client';
 import authRoutes from './api/routes/auth';
 import marcasRoutes from './api/routes/marcas';
 import boletinRoutes from './api/routes/boletin';
+import vigilanciaLoteRoutes from './api/routes/vigilanciaLote';
 import oposicionesRoutes from './api/routes/oposiciones';
 import documentosRoutes from './api/routes/documentos';
 import alertasRoutes from './api/routes/alertas';
@@ -75,6 +76,7 @@ app.get('/health', async (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/marcas', marcasRoutes);
 app.use('/api/boletin', boletinRoutes);
+app.use('/api/vigilancia-lote', vigilanciaLoteRoutes);
 app.use('/api/oposiciones', oposicionesRoutes);
 app.use('/api/documentos', documentosRoutes);
 app.use('/api/alertas', alertasRoutes);
