@@ -55,6 +55,7 @@ import {
   aMedianoche,
   type FilaBoletin,
 } from './boletinPortal';
+import { extraerTextoDelPdf, parsearActas, type ActaBoletin } from './boletinParser';
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,16 @@ export interface BoletinEnDisco {
   rutaPdf: string;
   tamanoMb: number;
   comentario: string;
+  /** Actas que el parser pudo leer del PDF. */
+  actasLeidas: number;
+  /** Las que entraron a la base en esta corrida. */
+  actasNuevas: number;
+  /** Las que ya estaban — se vuelve a correr la misma fecha, por ejemplo. */
+  actasRepetidas: number;
+  /** Bloques ilegibles más actas que no se pudieron guardar. */
+  actasFallidas: number;
+  /** Mixtas y figurativas: hay que pedirle la denominación al Web Service. */
+  sinDenominacion: number;
 }
 
 export interface ResultadoDescarga {
@@ -96,7 +107,7 @@ export interface ResultadoDescarga {
  */
 export async function descargarBoletinesDeLaFecha(
   fecha?: Date,
-  opciones?: { forzar?: boolean }
+  opciones?: { forzar?: boolean; soloNumero?: string }
 ): Promise<ResultadoDescarga> {
   const dia = aMedianoche(fecha || ultimoMiercoles());
   const diaTexto = dia.toLocaleDateString('es-AR');
@@ -117,6 +128,25 @@ export async function descargarBoletinesDeLaFecha(
 
   const publicados = filas.map((f) => f.numero);
   const advertencias: string[] = [];
+
+  // Procesar de a uno. Existe para las pruebas manuales: los cuatro boletines
+  // de una fecha son ~150 MB y varios minutos de trabajo, y el proxy de
+  // Railway corta la respuesta HTTP antes de que termine. La rutina semanal
+  // corre en un worker, sin nadie esperando del otro lado, así que ahí no hace
+  // falta — pero para verificar a mano sí.
+  //
+  // ⚠️ Con esto la fecha NO queda completa: se procesa un boletín de cuatro.
+  //    Por eso `completa` se fuerza a false más abajo.
+  const aProcesar = opciones?.soloNumero
+    ? filas.filter((f) => f.numero === opciones.soloNumero)
+    : filas;
+
+  if (opciones?.soloNumero && aProcesar.length === 0) {
+    throw new Error(
+      `El boletín ${opciones.soloNumero} no figura entre los del ${diaTexto}. ` +
+        `Publicados: ${publicados.join(', ')}.`
+    );
+  }
 
   logger.info(`  ${filas.length} boletines publicados: ${publicados.join(', ')}`);
 
@@ -154,7 +184,7 @@ export async function descargarBoletinesDeLaFecha(
   const descargados: BoletinEnDisco[] = [];
   const fallidos: { numero: string; error: string }[] = [];
 
-  for (const fila of filas) {
+  for (const fila of aProcesar) {
     if (!opciones?.forzar && (await yaSeDescargo(fila.numero))) {
       logger.info(`  ⏭️  Boletín ${fila.numero}: ya descargado, se omite`);
       continue;
@@ -165,15 +195,43 @@ export async function descargarBoletinesDeLaFecha(
       const rutaPdf = path.join(directorio, `${fila.numero}.pdf`);
       fs.writeFileSync(rutaPdf, pdf.bytes);
 
+      // ── Parsear y guardar ────────────────────────────────────────────────
+      const texto = await extraerTextoDelPdf(rutaPdf);
+      const parseo = parsearActas(texto);
+      const guardadas = await guardarActas(parseo.actas, dia, fila.numero);
+
+      if (parseo.fallidos.length > 0) {
+        advertencias.push(
+          `Boletín ${fila.numero}: ${parseo.fallidos.length} de ${parseo.bloques} bloques ` +
+            'no se pudieron leer. Son actas publicadas que no quedaron vigiladas.'
+        );
+      }
+      if (guardadas.fallidas > 0) {
+        advertencias.push(
+          `Boletín ${fila.numero}: ${guardadas.fallidas} actas se leyeron pero no se ` +
+            'pudieron guardar en la base.'
+        );
+      }
+
       descargados.push({
         numero: fila.numero,
         urlPdf: fila.urlPdf,
         rutaPdf,
         tamanoMb: pdf.tamanoMb,
         comentario: fila.comentario,
+        actasLeidas: parseo.actas.length,
+        actasNuevas: guardadas.nuevas,
+        actasRepetidas: guardadas.repetidas,
+        actasFallidas: guardadas.fallidas + parseo.fallidos.length,
+        sinDenominacion: parseo.actas.filter((a) => !a.denominacion).length,
       });
 
-      await registrar(dia, fila, { exitosa: true });
+      logger.info(
+        `  📖 Boletín ${fila.numero}: ${parseo.actas.length} actas leídas, ` +
+          `${guardadas.nuevas} nuevas, ${guardadas.repetidas} ya estaban`
+      );
+
+      await registrar(dia, fila, { exitosa: true, totalActas: guardadas.nuevas });
     } catch (err: any) {
       const error = err?.message || String(err);
       logger.error(`  ❌ Boletín ${fila.numero}: ${error}`);
@@ -183,7 +241,19 @@ export async function descargarBoletinesDeLaFecha(
   }
 
   // ── Control 3 ──────────────────────────────────────────────────────────────
-  const completa = fallidos.length === 0 && huecos.length === 0;
+  //
+  // Procesar uno solo nunca deja la fecha completa, aunque ese uno salga bien:
+  // quedan los otros tres sin mirar. Decirlo explícito evita que una prueba
+  // manual exitosa se confunda con una semana vigilada.
+  const completa =
+    !opciones?.soloNumero && fallidos.length === 0 && huecos.length === 0;
+
+  if (opciones?.soloNumero) {
+    advertencias.push(
+      `Se procesó solo el boletín ${opciones.soloNumero} de ${filas.length}. ` +
+        'La fecha NO está vigilada: faltan los demás.'
+    );
+  }
 
   if (fallidos.length > 0) {
     advertencias.push(
@@ -229,6 +299,140 @@ export function limpiar(resultado: ResultadoDescarga): void {
   }
 }
 
+// ── Guardado de actas ────────────────────────────────────────────────────────
+
+/**
+ * Actas por lote de inserción.
+ *
+ * Chico a propósito: si un lote falla, se pierden 200 actas y el log dice
+ * entre qué números estaban. Con lotes de 2.000 se perdería medio boletín y no
+ * se sabría por dónde buscar.
+ */
+const TAMANO_LOTE = 200;
+
+/**
+ * Guarda las actas leídas de un boletín.
+ *
+ * ── Por qué en lotes, y no una consulta por acta ───────────────────────────
+ *
+ * ⚠️ La primera versión hacía `findUnique` + `create` por cada acta. Con ~4.000
+ *    actas son 8.000 viajes de Railway a Supabase, y cada viaje son decenas de
+ *    milisegundos: **minutos enteros solo de latencia de red**. El proxy de
+ *    Railway cortaba la respuesta con `upstream error` antes de que terminara.
+ *
+ *    Al escribir aquella versión justifiqué el costo diciendo "son segundos".
+ *    No conté la latencia de red, que es la que manda cuando la base está del
+ *    otro lado de Internet. El error fue mío y está acá anotado para no
+ *    repetirlo: **en este sistema, el costo de una operación sobre la base se
+ *    mide en viajes, no en registros.**
+ *
+ * Ahora son 1 consulta para saber cuáles ya estaban, más un puñado de
+ * `createMany` por lotes. De 8.000 viajes a menos de 20.
+ *
+ * ── Los tres contadores se conservan ───────────────────────────────────────
+ *
+ * El motivo por el que la primera versión iba una por una era poder distinguir:
+ *
+ *   - **nuevas** — actas que no estaban
+ *   - **repetidas** — ya estaban; se reprocesa una fecha, por ejemplo
+ *   - **fallidas** — no se guardaron
+ *
+ * Esa distinción no se pierde: las repetidas salen de la consulta previa, y
+ * `createMany` devuelve cuántas entraron de verdad, así que un faltante dentro
+ * del lote se detecta igual. Lo único que se resigna es saber *cuál* acta del
+ * lote falló; por eso el lote es chico y el log dice entre qué números estaba.
+ *
+ * Una acta fallida es una marca que no se va a vigilar, y tiene que contarse
+ * aparte de una repetida, que es inofensiva. La diferencia entre "0 alertas
+ * porque no había nada" y "0 alertas porque no se guardó nada" es el producto
+ * entero.
+ */
+async function guardarActas(
+  actas: ActaBoletin[],
+  fechaBoletin: Date,
+  boletinNumero: string
+): Promise<{ nuevas: number; repetidas: number; fallidas: number }> {
+  if (actas.length === 0) return { nuevas: 0, repetidas: 0, fallidas: 0 };
+
+  // ── 1. Cuáles ya están, en UNA consulta ──────────────────────────────────
+  const numeros = actas.map((a) => a.acta);
+  const yaEstaban = new Set<string>();
+  try {
+    const previas = await prisma.boletinEntrada.findMany({
+      where: { acta: { in: numeros } },
+      select: { acta: true },
+    });
+    for (const p of previas) yaEstaban.add(p.acta);
+  } catch (err: any) {
+    // Sin este dato se insertaría a ciegas y los duplicados harían fallar el
+    // lote entero. Mejor abortar el boletín y que quede contado como fallido.
+    throw new Error(`No se pudo consultar qué actas ya estaban: ${err.message}`);
+  }
+
+  const aInsertar = actas.filter((a) => !yaEstaban.has(a.acta));
+
+  // ── 2. Insertar en lotes ─────────────────────────────────────────────────
+  let nuevas = 0;
+  let fallidas = 0;
+
+  for (let i = 0; i < aInsertar.length; i += TAMANO_LOTE) {
+    const lote = aInsertar.slice(i, i + TAMANO_LOTE);
+    try {
+      const r = await prisma.boletinEntrada.createMany({
+        data: lote.map((a) => filaDeActa(a, fechaBoletin, boletinNumero)),
+        skipDuplicates: true,
+      });
+      nuevas += r.count;
+      // `createMany` devuelve cuántas entraron. Si entraron menos que las del
+      // lote, la diferencia son actas que no quedaron guardadas — o sea,
+      // marcas que no se van a vigilar. No se puede pasar por alto.
+      if (r.count < lote.length) fallidas += lote.length - r.count;
+    } catch (err: any) {
+      fallidas += lote.length;
+      logger.error(
+        `[Boletín ${boletinNumero}] Falló un lote de ${lote.length} actas ` +
+          `(${lote[0].acta} a ${lote[lote.length - 1].acta}): ${err.message}`
+      );
+    }
+  }
+
+  return { nuevas, repetidas: yaEstaban.size, fallidas };
+}
+
+/** Una acta parseada, con la forma que espera la base. */
+function filaDeActa(a: ActaBoletin, fechaBoletin: Date, boletinNumero: string) {
+  return {
+    fechaBoletin,
+    boletinNumero,
+    acta: a.acta,
+    claseNiza: a.clase,
+    denominacion: a.denominacion, // null en mixtas y figurativas
+    tipoInid: a.tipo,
+    tipoMarca: nombreDelTipo(a.tipo),
+    titularNombre: a.titulares.map((t) => t.nombre).join(' * ') || 'No informado',
+    productos: a.productos || null,
+    productosTruncados: /PUEDE SER CONSULTADA EN EL SIGUIENTE ENLACE/i.test(a.productos),
+    fechaPresentacion: a.fechaPresentacion,
+    agenteNumero: a.agente,
+    porDerechoPropio: a.porDerechoPropio,
+    colores: a.colores,
+    prioridad: a.prioridad,
+  };
+}
+
+/** El código INID (40) en palabras, para las pantallas. */
+function nombreDelTipo(inid: string): string {
+  return (
+    {
+      D: 'DENOMINATIVA',
+      M: 'MIXTA',
+      F: 'FIGURATIVA',
+      T: 'TRIDIMENSIONAL',
+      R: 'OTRA',
+    }[inid] || 'DENOMINATIVA'
+  );
+}
+
 // ── Persistencia ─────────────────────────────────────────────────────────────
 
 /**
@@ -242,7 +446,7 @@ export function limpiar(resultado: ResultadoDescarga): void {
 async function registrar(
   fecha: Date,
   fila: FilaBoletin,
-  estado: { exitosa: boolean; error?: string }
+  estado: { exitosa: boolean; error?: string; totalActas?: number }
 ): Promise<void> {
   try {
     await prisma.boletinDescarga.create({
@@ -251,7 +455,7 @@ async function registrar(
         boletinNumero: fila.numero,
         urlDescargada: fila.urlPdf,
         exitosa: estado.exitosa,
-        totalActas: 0, // lo completa el parser
+        totalActas: estado.totalActas ?? 0,
         error: estado.error || null,
       },
     });
