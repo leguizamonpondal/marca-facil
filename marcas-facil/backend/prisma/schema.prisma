@@ -1,4 +1,4 @@
-// MARCAS FÁCIL — Schema de base de datos PostgreSQL + Prisma
+// MARCA FÁCIL — Schema de base de datos PostgreSQL + Prisma
 // Honorio M. Leguizamón Pondal — Agente PI Mat. N° 1974
 
 generator client {
@@ -74,6 +74,11 @@ model PushToken {
 // MARCAS
 // ============================================================
 
+enum TipoNotoriedad {
+  NOTORIA
+  RENOMBRADA
+}
+
 model Marca {
   id              String       @id @default(uuid())
   userId          String
@@ -111,6 +116,27 @@ model Marca {
   // Vigilancia automática contra el Boletín
   vigilanciaActiva Boolean    @default(true)
 
+  // ── Vigilancia ampliada — módulo pago para notorias y renombradas ─────────
+  //
+  // `false` (default): se vigila la clase idéntica más las afines de la tabla
+  // `afinidadClases.ts`. Es el alcance de todos los clientes.
+  //
+  // `true`: se vigila en las 45 clases, con umbral de identidad o
+  // cuasi-identidad (`cuasiIdentidad.ts`). En clase no afín no hay proximidad
+  // comercial que corrobore, así que el umbral normal sería ruido puro.
+  vigilanciaAmpliada Boolean  @default(false)
+
+  // Documenta el encuadre y funda el escrito; NO determina el alcance, que lo
+  // fija `vigilanciaAmpliada`. Se separan porque en la práctica las dos
+  // figuras se confunden y se les aplica protección mayor a las dos.
+  //
+  //   `NOTORIA`    — CUP 6 bis + ADPIC 16.2. La conoce el sector pertinente.
+  //                  Excepciona territorialidad y registro: se protege sin
+  //                  registro local.
+  //   `RENOMBRADA` — ADPIC 16.3. La conoce el público en general. Excepciona
+  //                  la especialidad: alcanza cualquier clase. Exige registro.
+  tipoNotoriedad  TipoNotoriedad?
+
   notas           String?
 
   createdAt       DateTime    @default(now())
@@ -141,12 +167,36 @@ model BoletinEntrada {
 
   // Datos de la marca publicada en el boletín
   acta            String   @unique
-  denominacion    String
-  tipoMarca       String   @default("DENOMINATIVA")
   claseNiza       Int
+
+  // ⚠️ NULLABLE a propósito. El 51 % de las actas son mixtas o figurativas y
+  //    traen el (54) vacío: la denominación está dentro del logo, que en el
+  //    PDF es una imagen. Hay que pedírsela al Web Service por número de acta.
+  //    Guardar "" o un placeholder haría indistinguible "no la sabemos" de
+  //    "la marca se llama así", que es justo lo que no puede pasar.
+  denominacion    String?
+
+  // Código INID (40): D denominativa · M mixta · F figurativa · T 3D · R
+  tipoInid        String?
+  tipoMarca       String   @default("DENOMINATIVA")
+
   titularNombre   String   @default("No informado")
   titularCuit     String?
   productos       String?
+
+  // (22) fecha y hora de presentación ante el INPI
+  fechaPresentacion DateTime?
+
+  // (74) matrícula del agente de la PI. NULL si fue por derecho propio.
+  agenteNumero    Int?
+  porDerechoPropio Boolean @default(false)
+
+  // (59) colores reivindicados y (30) prioridad extranjera
+  colores         String?
+  prioridad       String?
+
+  // El (57) del boletín a veces viene truncado y remite a una consulta aparte.
+  productosTruncados Boolean @default(false)
 
   // Control de procesamiento
   procesado       Boolean  @default(false) // Si ya se cruzó con marcas del sistema
@@ -157,6 +207,7 @@ model BoletinEntrada {
   @@index([fechaBoletin])
   @@index([claseNiza])
   @@index([denominacion])
+  @@index([agenteNumero])
   @@map("boletin_entradas")
 }
 
