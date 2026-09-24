@@ -9,7 +9,11 @@ import { prisma } from '../../db/client';
 import { AppError } from '../../middleware/errorHandler';
 import { authenticate, requirePlan, AuthRequest } from '../../middleware/auth';
 import { boletinService } from '../../services/boletinService';
-import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles } from '../../services/boletinPortal';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles, descargarPdf } from '../../services/boletinPortal';
+import { extraerTextoDelPdf, parsearActas } from '../../services/boletinParser';
 import { descargarBoletinesDeLaFecha, limpiar as limpiarTemporales } from '../../services/boletinDescarga';
 import { logger } from '../../utils/logger';
 
@@ -140,6 +144,86 @@ router.get('/portal/descargar', async (req, res: Response) => {
   } finally {
     // Siempre, incluso si algo explotó: son ~100 MB de temporales.
     if (resultado) limpiarTemporales(resultado);
+  }
+});
+
+// ── GET /api/boletin/portal/parsear ──────────────────────────────────────────
+//
+// Baja UN boletín y lo parsea, sin guardar nada. Es la prueba de que el
+// circuito completo funciona contra el servidor real.
+//
+//   ?numero=11121   → ese boletín
+//   (sin número)    → el primero del último miércoles
+router.get('/portal/parsear', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const inicio = Date.now();
+  try {
+    const numero = req.query.numero ? String(req.query.numero) : undefined;
+    const filas = await boletinesDeMarcasNuevas(ultimoMiercoles());
+    const fila = numero ? filas.find((f) => f.numero === numero) : filas[0];
+
+    if (!fila) {
+      return res.status(404).json({
+        error: numero
+          ? `El boletín ${numero} no figura entre los de MARCAS NUEVAS del último miércoles`
+          : 'No hay boletines para el último miércoles',
+        disponibles: filas.map((f) => f.numero),
+      });
+    }
+
+    const pdf = await descargarPdf(fila);
+    const tmp = path.join(os.tmpdir(), `boletin-${fila.numero}.pdf`);
+    fs.writeFileSync(tmp, pdf.bytes);
+
+    try {
+      const texto = await extraerTextoDelPdf(tmp);
+      const r = parsearActas(texto);
+
+      const porTipo: Record<string, number> = {};
+      const porClase: Record<number, number> = {};
+      for (const a of r.actas) {
+        porTipo[a.tipo] = (porTipo[a.tipo] || 0) + 1;
+        porClase[a.clase] = (porClase[a.clase] || 0) + 1;
+      }
+      const conDenominacion = r.actas.filter((a) => a.denominacion).length;
+
+      return res.json({
+        boletin: fila.numero,
+        fecha: fila.fecha.toLocaleDateString('es-AR'),
+        tamanoMb: pdf.tamanoMb,
+        caracteresDeTexto: texto.length,
+        bloques: r.bloques,
+        actasLeidas: r.actas.length,
+        fallidos: r.fallidos.length,
+        veredicto:
+          r.fallidos.length === 0
+            ? `Se leyeron las ${r.actas.length} actas del boletín, sin fallos.`
+            : `⚠️ ${r.fallidos.length} de ${r.bloques} bloques no se pudieron leer.`,
+        porTipo,
+        conDenominacion,
+        sinDenominacion: r.actas.length - conDenominacion,
+        notaSinDenominacion:
+          'Las mixtas y figurativas traen el (54) vacío: la denominación está dentro del logo. ' +
+          'Hay que pedírsela al Web Service por número de acta.',
+        clasesMasPobladas: Object.entries(porClase)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 8)
+          .map(([clase, n]) => ({ clase: Number(clase), actas: n })),
+        muestra: r.actas.filter((a) => a.denominacion).slice(0, 5),
+        primerosFallidos: r.fallidos.slice(0, 3),
+        latenciaMs: Date.now() - inicio,
+      });
+    } finally {
+      try { fs.unlinkSync(tmp); } catch { /* el temporal ya no importa */ }
+    }
+  } catch (err: any) {
+    logger.error(`[Boletín] Falló el parseo: ${err.message}`);
+    return res.status(502).json({
+      error: 'No se pudo parsear el boletín',
+      detalle: err.message,
+      latenciaMs: Date.now() - inicio,
+    });
   }
 });
 
