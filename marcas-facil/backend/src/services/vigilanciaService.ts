@@ -49,6 +49,12 @@ import {
   type GradoAfinidad,
 } from '../utils/afinidadClases';
 import { esCuasiIdentica, type ReglaCuasiIdentidad } from '../utils/cuasiIdentidad';
+import {
+  extraerVedette,
+  explicarVedette,
+  usoComunSembrado,
+  type EsUsoComun,
+} from '../utils/motVedette';
 
 // ── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +79,20 @@ export interface Coincidencia {
   /** Qué regla disparó — solo para cuasi-identidad. */
   regla?: ReglaCuasiIdentidad;
   similitud: number;
+  /**
+   * Qué eje hizo entrar la coincidencia, con su valor y el umbral que superó.
+   *
+   * La decisión se toma **por eje** —basta que uno supere, que es el criterio
+   * del INPI y de la CNCAF— pero antes se informaba `similitudTotal`, el
+   * promedio ponderado. Eso hacía que el listado dijera «similitud 65 %» en
+   * una coincidencia que había entrado por ideológica 92 con umbral 72: quien
+   * lo leía concluía, con razón, que el motor estaba roto.
+   */
+  ejeQueDisparo?: 'gráfico' | 'fonético' | 'ideológico';
+  valorDelEje?: number;
+  umbral?: number;
+  /** Sobre qué términos se hizo el cotejo conceptual (mot vedette). */
+  cotejoSobre?: string;
   explicacion: string;
   /** Qué tiene que hacer el matriculado con esto. */
   accion: string;
@@ -120,7 +140,14 @@ type ActaIndexada = {
  */
 export function cruzarUnaMarca(
   marca: MarcaACruzar,
-  porClase: Map<number, ActaIndexada[]>
+  porClase: Map<number, ActaIndexada[]>,
+  /**
+   * Cómo se decide qué palabras son de uso común en cada clase. Se inyecta
+   * porque el dato verdadero está en el padrón del INPI, no acá: hoy el
+   * predicado por defecto sólo conoce una lista sembrada a mano, y cuando
+   * exista el índice consultado al INPI se pasa ése sin tocar esta función.
+   */
+  esUsoComun: EsUsoComun = usoComunSembrado
 ): { coincidencias: Coincidencia[]; comparaciones: number } {
   const coincidencias: Coincidencia[] = [];
   let comparaciones = 0;
@@ -136,14 +163,30 @@ export function cruzarUnaMarca(
   for (const [clase, grado] of criterioPorClase) {
     for (const e of porClase.get(clase) || []) {
       comparaciones++;
-      const sim = calcularSimilitudMarcas(marca.denominacion, e.denominacion!);
+
+      // El mot vedette de cada lado, cada uno con SU clase: una palabra puede
+      // ser de uso común en la clase de la marca y plena en la del acta.
+      const vMarca = extraerVedette(marca.denominacion, marca.claseNiza, esUsoComun);
+      const vActa = extraerVedette(e.denominacion!, e.claseNiza, esUsoComun);
+
+      const sim = calcularSimilitudMarcas(marca.denominacion, e.denominacion!, {
+        vedette1: vMarca.vedette,
+        vedette2: vActa.vedette,
+      });
       const umbral = UMBRAL_POR_AFINIDAD[grado] * 100;
 
-      const supera =
-        sim.similitudGrafica >= umbral ||
-        sim.similitudFonetica >= umbral ||
-        sim.similitudIdeologica >= umbral;
-      if (!supera) continue;
+      // Se informa el eje que disparó, no el promedio. Orden de preferencia:
+      // gráfico, fonético, ideológico — del más objetivo al más discutible.
+      let ejeQueDisparo: 'gráfico' | 'fonético' | 'ideológico' | null = null;
+      let valorDelEje = 0;
+      if (sim.similitudGrafica >= umbral) {
+        ejeQueDisparo = 'gráfico'; valorDelEje = sim.similitudGrafica;
+      } else if (sim.similitudFonetica >= umbral) {
+        ejeQueDisparo = 'fonético'; valorDelEje = sim.similitudFonetica;
+      } else if (sim.similitudIdeologica >= umbral) {
+        ejeQueDisparo = 'ideológico'; valorDelEje = sim.similitudIdeologica;
+      }
+      if (!ejeQueDisparo) continue;
 
       coincidencias.push({
         marcaId: marca.id,
@@ -157,14 +200,22 @@ export function cruzarUnaMarca(
         motivo: 'afinidad',
         gradoAfinidad: grado,
         similitud: sim.similitudTotal,
+        ejeQueDisparo,
+        valorDelEje,
+        umbral,
+        cotejoSobre: sim.ideologicaSobre,
         explicacion:
-          grado === 'identica'
-            ? `Misma clase (${clase}). Similitud ${sim.similitudTotal} % — ` +
-              `gráfica ${sim.similitudGrafica}, fonética ${sim.similitudFonetica}, ` +
-              `ideológica ${sim.similitudIdeologica}.`
-            : `Clase ${e.claseNiza} frente a ${marca.claseNiza}, afinidad ${grado} ` +
-              `(similitud ${sim.similitudTotal} %). ` +
-              `${afinidadEntreClases(marca.claseNiza, e.claseNiza).fundamento}`,
+          (grado === 'identica'
+            ? `Misma clase (${clase}). `
+            : `Clase ${e.claseNiza} frente a ${marca.claseNiza}, afinidad ${grado}. ` +
+              `${afinidadEntreClases(marca.claseNiza, e.claseNiza).fundamento} `) +
+          `Entró por el eje ${ejeQueDisparo} con ${valorDelEje} % ` +
+          `(umbral ${Math.round(umbral)} %). ` +
+          `Ejes: gráfica ${sim.similitudGrafica}, fonética ${sim.similitudFonetica}, ` +
+          `ideológica ${sim.similitudIdeologica} sobre ${sim.ideologicaSobre}. ` +
+          (vMarca.descartadas.length || vMarca.graficos.length
+            ? explicarVedette(vMarca) + ' '
+            : ''),
         accion: 'Cotejar el expediente y resolver si corresponde oponerse.',
       });
     }
