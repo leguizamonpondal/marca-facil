@@ -299,9 +299,12 @@ export async function indexarActas(fechaBoletin: Date): Promise<{
     // que un "3 coincidencias" se lea como si se hubiera mirado todo.
     advertencias.push(
       `${sinDenominacion} de ${entradas.length} actas no tienen denominación y ` +
-        'quedaron fuera del cotejo. Son mixtas y figurativas: la denominación está ' +
-        'dentro del logo y hay que pedírsela al Web Service del INPI por número de acta. ' +
-        'Hasta que eso esté, la vigilancia mira algo menos de la mitad de lo publicado.'
+        'quedaron fuera del cotejo. Son mixtas y figurativas: el (54) del Boletín viene ' +
+        'vacío porque la denominación está dentro del logo, que en el PDF es una imagen. ' +
+        'Las mixtas SÍ tienen denominación y se recupera consultando al Web Service por ' +
+        'TITULAR —el Boletín publica el (73) de todas las actas— y emparejando por número ' +
+        'de acta. Las figurativas no tienen denominación: se cotejan por Clasificación de ' +
+        'Viena. Hasta que eso esté, la vigilancia mira algo menos de la mitad de lo publicado.'
     );
   }
 
