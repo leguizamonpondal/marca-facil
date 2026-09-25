@@ -246,7 +246,10 @@ const GRUPOS_IDEOLOGICOS: string[][] = [
   ['resplandor', 'glow', 'gleam'],
 
   // ── Números con significado marcario ──
-  ['uno', 'one', 'first', 'primero', 'prime', 'uno', 'un'],
+  // `una` estaba faltando: sin ella, UN × UNA daba 0 ideológico y con fonética 67
+  // no llegaba al umbral. El matriculado pidió expresamente que UN, UNA y UNO se
+  // detecten entre sí como marcas (25/09/2026).
+  ['uno', 'una', 'one', 'first', 'primero', 'primera', 'prime', 'un'],
   ['dos', 'two', 'second', 'duo', 'bi'],
   ['tres', 'three', 'tri', 'triple'],
   ['cien', 'hundred', 'century'],
@@ -300,27 +303,49 @@ for (let i = 0; i < GRUPOS_IDEOLOGICOS.length; i++) {
 function similitudIdeologica(n1: string, n2: string): number {
   if (n1 === n2) return 1.0;
 
-  const palabras1 = n1.split(/\s+/);
-  const palabras2 = n2.split(/\s+/);
+  const palabras1 = n1.split(/\s+/).filter(Boolean);
+  const palabras2 = n2.split(/\s+/).filter(Boolean);
+  if (!palabras1.length || !palabras2.length) return 0;
 
-  let maxSim = 0;
-
+  // ── Por qué se pondera por la proporción del conjunto ─────────────────────
+  //
+  // Antes esta función devolvía 0,92 si UNA palabra cualquiera de una marca
+  // compartía grupo conceptual con UNA palabra cualquiera de la otra, sin
+  // mirar cuánto pesaba esa palabra dentro del conjunto. Eso hacía coincidir
+  // marcas que no tienen nada que ver:
+  //
+  //   PLAYER ONE × FIRST TACTICAL   gráfica 0, fonética 5, ideológica 92
+  //
+  // El único parecido es que `one` y `first` están en el mismo grupo de
+  // numerales. Ni se escriben ni suenan parecido. Lo detectó la app en
+  // producción el 25/09/2026 contra el boletín del 23/09.
+  //
+  // El cotejo es del CONJUNTO: una palabra de dos abarca la mitad del signo,
+  // una de cuatro un cuarto. Se suma el mejor parecido conceptual de cada
+  // palabra y se divide por el conjunto más largo. Así:
+  //
+  //   CASA × HOME                    1 de 1  → 0,92   confundibles (criterio
+  //                                                   del matriculado)
+  //   PLAYER ONE × FIRST TACTICAL    1 de 2  → 0,46   no alcanza
+  //   JUSTA ARMONIA HOME DECOR ×
+  //     HOMAX HOME MATERIALS         1 de 4  → 0,25   no alcanza
+  //
+  // Los ejes gráfico y fonético siguen mirando el conjunto sin ponderar: ahí
+  // el parecido ya es del signo entero por construcción.
+  let suma = 0;
   for (const p1 of palabras1) {
     const grupo1 = indiceIdeologico.get(p1);
-    if (grupo1 === undefined) continue;
-
+    let mejor = 0;
     for (const p2 of palabras2) {
+      if (p1 === p2) { mejor = 1.0; break; }
+      if (grupo1 === undefined) continue;
       const grupo2 = indiceIdeologico.get(p2);
-      if (grupo2 === undefined) continue;
-
-      if (grupo1 === grupo2) {
-        // Mismo grupo conceptual
-        maxSim = Math.max(maxSim, p1 === p2 ? 1.0 : 0.92);
-      }
+      if (grupo2 !== undefined && grupo1 === grupo2) mejor = Math.max(mejor, 0.92);
     }
+    suma += mejor;
   }
 
-  return maxSim;
+  return suma / Math.max(palabras1.length, palabras2.length);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
