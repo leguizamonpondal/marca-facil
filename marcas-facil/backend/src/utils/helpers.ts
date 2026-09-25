@@ -1,6 +1,5 @@
-
 import { createHash } from 'crypto';
- 
+
 /**
  * Genera un código de referido único a partir del CUIT
  */
@@ -8,7 +7,7 @@ export function generateReferralCode(cuit: string): string {
   const hash = createHash('md5').update(cuit + Date.now()).digest('hex');
   return hash.substring(0, 8).toUpperCase();
 }
- 
+
 /**
  * Calcula días hábiles desde una fecha
  * (excluye sábados y domingos; no maneja feriados argentinos por simplicidad)
@@ -23,7 +22,7 @@ export function addBusinessDays(startDate: Date, days: number): Date {
   }
   return result;
 }
- 
+
 /**
  * Calcula días corridos desde una fecha
  */
@@ -32,7 +31,7 @@ export function addCalendarDays(startDate: Date, days: number): Date {
   result.setDate(result.getDate() + days);
   return result;
 }
- 
+
 /**
  * Formatea CUIT con guiones: 20-12345678-9
  */
@@ -41,7 +40,7 @@ export function formatCuit(cuit: string): string {
   if (digits.length !== 11) return cuit;
   return `${digits.slice(0, 2)}-${digits.slice(2, 10)}-${digits[10]}`;
 }
- 
+
 /**
  * Normaliza texto para comparación: minúsculas, sin acentos, sin especiales
  */
@@ -54,13 +53,13 @@ export function normalizarMarca(texto: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EJE 1: SIMILITUD GRÁFICA / ORTOGRÁFICA
 // Mide cuánto se parecen visualmente las marcas como texto escrito.
 // Herramientas: Levenshtein + n-gramas (trigramas) de Dice.
 // ─────────────────────────────────────────────────────────────────────────────
- 
+
 function levenshteinDistance(a: string, b: string): number {
   const matrix: number[][] = [];
   for (let i = 0; i <= b.length; i++) matrix[i] = [i];
@@ -74,7 +73,7 @@ function levenshteinDistance(a: string, b: string): number {
   }
   return matrix[b.length][a.length];
 }
- 
+
 function ngramSimilarity(a: string, b: string, n: number): number {
   const getNgrams = (s: string, size: number): Set<string> => {
     const ngrams = new Set<string>();
@@ -89,7 +88,7 @@ function ngramSimilarity(a: string, b: string, n: number): number {
   ng1.forEach(g => { if (ng2.has(g)) intersection++; });
   return (2 * intersection) / (ng1.size + ng2.size); // coeficiente de Dice
 }
- 
+
 function similitudGrafica(n1: string, n2: string): number {
   if (n1 === n2) return 1.0;
   const levenSim = 1 - levenshteinDistance(n1, n2) / Math.max(n1.length, n2.length, 1);
@@ -97,13 +96,13 @@ function similitudGrafica(n1: string, n2: string): number {
   // Peso mayor a Levenshtein para capturas de variantes ortográficas breves
   return levenSim * 0.60 + ngramSim * 0.40;
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EJE 2: SIMILITUD FONÉTICA
 // Mide cuánto se parecen las marcas al pronunciarlas en español rioplatense.
 // Reglas adaptadas a Argentina (INPI, CNCAF).
 // ─────────────────────────────────────────────────────────────────────────────
- 
+
 function aplicarFoneticoEspanol(texto: string): string {
   return texto
     // Dígrafo ch → X antes de normalizar
@@ -140,7 +139,7 @@ function aplicarFoneticoEspanol(texto: string): string {
     // Eliminar espacios
     .replace(/\s+/g, '');
 }
- 
+
 function similitudFonetica(n1: string, n2: string): number {
   if (n1 === n2) return 1.0;
   const f1 = aplicarFoneticoEspanol(n1);
@@ -150,14 +149,14 @@ function similitudFonetica(n1: string, n2: string): number {
   const ngramSim = ngramSimilarity(f1, f2, 2); // bigramas para fonética
   return levenSim * 0.65 + ngramSim * 0.35;
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EJE 3: SIMILITUD IDEOLÓGICA / CONCEPTUAL
 // Mide si las marcas evocan el mismo concepto aunque sean palabras distintas.
 // Es criterio autónomo de confundibilidad (Art. 3° b) Ley 22.362 — CNCAF).
 // Ejemplos: GOLDEN/DORADO, KING/REY, LUNA/MOON, LION/LEON.
 // ─────────────────────────────────────────────────────────────────────────────
- 
+
 /**
  * Grupos de equivalencia ideológica.
  * Cada grupo contiene palabras o raíces que evocan el mismo concepto.
@@ -176,7 +175,7 @@ const GRUPOS_IDEOLOGICOS: string[][] = [
   ['violeta', 'violet', 'purple', 'morado'],
   ['naranja', 'orange'],
   ['rosa', 'pink', 'rose'],
- 
+
   // ── Animales ──
   ['perro', 'dog', 'hound', 'canino', 'canine', 'cane'],
   ['gato', 'cat', 'feline', 'felino', 'chat'],
@@ -195,7 +194,7 @@ const GRUPOS_IDEOLOGICOS: string[][] = [
   ['delfin', 'dolphin'],
   ['paloma', 'dove', 'pigeon'],
   ['halcon', 'falcon', 'hawk'],
- 
+
   // ── Astros y naturaleza ──
   ['sol', 'sun', 'soleil', 'sole', 'solar'],
   ['luna', 'moon', 'lunar', 'lune'],
@@ -210,7 +209,7 @@ const GRUPOS_IDEOLOGICOS: string[][] = [
   ['hielo', 'ice', 'glaciar'],
   ['montana', 'mountain', 'mont'],
   ['bosque', 'forest', 'selva', 'jungle'],
- 
+
   // ── Jerarquía / Realeza ──
   ['rey', 'king', 'rex', 'real', 'royal', 'regio'],
   ['reina', 'queen'],
@@ -219,14 +218,14 @@ const GRUPOS_IDEOLOGICOS: string[][] = [
   ['imperio', 'empire', 'imperial'],
   ['maestro', 'master', 'maestre'],
   ['jefe', 'chief', 'boss'],
- 
+
   // ── Fuerza / Velocidad ──
   ['rapido', 'fast', 'quick', 'speed', 'express', 'turbo', 'veloz', 'swift'],
   ['fuerte', 'strong', 'forte', 'power', 'poder', 'potente', 'mighty'],
   ['titan', 'titan', 'titanic', 'colossal', 'colosal'],
   ['gigante', 'giant', 'mega', 'ultra'],
   ['agil', 'agile', 'nimble'],
- 
+
   // ── Calidad / Excelencia ──
   ['mejor', 'best', 'top', 'prime', 'primero', 'numero uno'],
   ['optimo', 'optimal', 'optimum'],
@@ -235,53 +234,53 @@ const GRUPOS_IDEOLOGICOS: string[][] = [
   ['puro', 'pure', 'pura', 'natural'],
   ['nuevo', 'new', 'nuevo', 'nouveau', 'neo'],
   ['bueno', 'good', 'buen', 'bien'],
- 
+
   // ── Escudo / Protección ──
   ['escudo', 'shield', 'proteccion'],
   ['fortaleza', 'fortress', 'castle', 'castillo'],
   ['fuerza', 'force', 'power'],
- 
+
   // ── Luz / Brillo ──
   ['luz', 'light', 'lux', 'lumiere', 'lumen'],
   ['brillante', 'bright', 'shine', 'brilliant', 'brillo'],
   ['resplandor', 'glow', 'gleam'],
- 
+
   // ── Números con significado marcario ──
   ['uno', 'one', 'first', 'primero', 'prime', 'uno', 'un'],
   ['dos', 'two', 'second', 'duo', 'bi'],
   ['tres', 'three', 'tri', 'triple'],
   ['cien', 'hundred', 'century'],
   ['mil', 'thousand', 'kilo', 'milli'],
- 
+
   // ── Dirección / Movimiento ──
   ['norte', 'north', 'nord'],
   ['sur', 'south'],
   ['este', 'east'],
   ['oeste', 'west'],
- 
+
   // ── Hogar / Familia ──
   ['casa', 'home', 'house', 'maison'],
   ['familia', 'family', 'hogar'],
- 
+
   // ── Misticismo / Espíritu ──
   ['angel', 'angel'],
   ['dragon', 'dragon'],
   ['fenix', 'phoenix', 'fenix'],
   ['milagro', 'miracle', 'milagros'],
   ['espiritu', 'spirit', 'soul', 'alma'],
- 
+
   // ── Alimentos / Sabores ──
   ['miel', 'honey'],
   ['dulce', 'sweet'],
   ['amargo', 'bitter'],
   ['sal', 'salt', 'salty'],
- 
+
   // ── Tecnología ──
   ['digital', 'digital', 'tech', 'tecnologia'],
   ['global', 'global', 'mundial', 'world'],
   ['red', 'network', 'net', 'web'],
 ];
- 
+
 /** Índice word → id de grupo (para lookup O(1)) */
 const indiceIdeologico = new Map<string, number>();
 for (let i = 0; i < GRUPOS_IDEOLOGICOS.length; i++) {
@@ -293,52 +292,81 @@ for (let i = 0; i < GRUPOS_IDEOLOGICOS.length; i++) {
     }
   }
 }
- 
+
 /**
  * Calcula similitud ideológica entre dos marcas (0-1).
  * Retorna 0.95 si comparten grupo de concepto, 0 si no.
  */
 function similitudIdeologica(n1: string, n2: string): number {
   if (n1 === n2) return 1.0;
- 
+
   const palabras1 = n1.split(/\s+/);
   const palabras2 = n2.split(/\s+/);
- 
+
   let maxSim = 0;
- 
+
   for (const p1 of palabras1) {
     const grupo1 = indiceIdeologico.get(p1);
     if (grupo1 === undefined) continue;
- 
+
     for (const p2 of palabras2) {
       const grupo2 = indiceIdeologico.get(p2);
       if (grupo2 === undefined) continue;
- 
+
       if (grupo1 === grupo2) {
         // Mismo grupo conceptual
         maxSim = Math.max(maxSim, p1 === p2 ? 1.0 : 0.92);
       }
     }
   }
- 
+
   return maxSim;
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FUNCIÓN PRINCIPAL: calcularSimilitudMarcas
 // Combina los tres ejes. Sigue criterio del INPI y la CNCAF:
 //   • La confundibilidad puede provenir de cualquiera de los tres ejes
 //   • Basta que uno de los tres supere el umbral para declarar confundibilidad
 // ─────────────────────────────────────────────────────────────────────────────
- 
+
 export interface ResultadoSimilitud {
   similitudTotal: number;       // 0-100 — puntuación combinada
   similitudGrafica: number;     // 0-100
   similitudFonetica: number;    // 0-100
   similitudIdeologica: number;  // 0-100
   ejesDominantes: string[];     // cuáles ejes superan umbral
+  /** Sobre qué texto se midió el eje ideológico. */
+  ideologicaSobre: string;
 }
- 
+
+export interface OpcionesSimilitud {
+  /**
+   * Mot vedette de cada marca. Si se pasan, **el eje ideológico se mide sólo
+   * sobre ellos**; los ejes gráfico y fonético siguen mirando el conjunto.
+   *
+   * ── Por qué ────────────────────────────────────────────────────────────
+   *
+   * `similitudIdeologica` devuelve 0,92 si CUALQUIER palabra de una marca
+   * comparte grupo conceptual con CUALQUIER palabra de la otra. Sin filtro,
+   * una preposición o una palabra de uso común en la clase tiende un puente
+   * entre marcas que no tienen nada que ver: `UN UNIVERSO DE FABULAS` daba
+   * 92 % ideológico contra `PIER ONE` porque el grupo de numerales incluye
+   * `un / uno / one`, y `CASA BLANCA` daba 92 % contra `HOME DEPOT`.
+   *
+   * La doctrina resuelve esto con el **mot vedette**: el cotejo conceptual se
+   * hace sobre el término que sobresale, no sobre cualquier palabra del
+   * conjunto. Ver `utils/motVedette.ts`.
+   *
+   * El gráfico y el fonético NO se recortan a propósito: ésos sí son del
+   * conjunto —así se lee y así se pronuncia la marca— y es lo que sostiene la
+   * única coincidencia legítima de la primera corrida
+   * (`PLAYER ONE` × `PIER ONE`, gráfica 65 y fonética 63).
+   */
+  vedette1?: string;
+  vedette2?: string;
+}
+
 /**
  * Calcula la similitud entre dos denominaciones marcarias.
  * @returns objeto con puntuación por eje y total
@@ -346,41 +374,51 @@ export interface ResultadoSimilitud {
 export function calcularSimilitudMarcas(
   marca1: string,
   marca2: string,
+  op: OpcionesSimilitud = {},
 ): ResultadoSimilitud {
   const n1 = normalizarMarca(marca1);
   const n2 = normalizarMarca(marca2);
- 
+
   const sg = similitudGrafica(n1, n2);
   const sf = similitudFonetica(n1, n2);
-  const si = similitudIdeologica(n1, n2);
- 
+
+  // El eje ideológico se mide sobre el mot vedette cuando se lo conoce.
+  // Si el vedette vino vacío (marca figurativa pura) no hay nada que cotejar
+  // conceptualmente: 0, no el conjunto — cotejar el conjunto es justamente el
+  // error que trae de vuelta los falsos positivos.
+  const hayVedettes = op.vedette1 !== undefined && op.vedette2 !== undefined;
+  const v1 = hayVedettes ? normalizarMarca(op.vedette1!) : n1;
+  const v2 = hayVedettes ? normalizarMarca(op.vedette2!) : n2;
+  const si = hayVedettes && (!v1 || !v2) ? 0 : similitudIdeologica(v1, v2);
+
   // Puntuación combinada: el mayor de los tres ejes tiene peso dominante
   // (criterio: basta que uno supere para confundir)
   const maxEje = Math.max(sg, sf, si);
- 
+
   // Promedio ponderado dando más peso al eje más fuerte
   const total = maxEje * 0.50 + (sg + sf + si) / 3 * 0.50;
- 
+
   const ejesDominantes: string[] = [];
   if (sg >= 0.70) ejesDominantes.push('gráfico');
   if (sf >= 0.70) ejesDominantes.push('fonético');
   if (si >= 0.85) ejesDominantes.push('ideológico');
- 
+
   return {
     similitudTotal: Math.round(total * 100),
     similitudGrafica: Math.round(sg * 100),
     similitudFonetica: Math.round(sf * 100),
     similitudIdeologica: Math.round(si * 100),
     ejesDominantes,
+    ideologicaSobre: hayVedettes ? `«${v1}» × «${v2}»` : 'el conjunto completo',
   };
 }
- 
+
 // ─────────────────────────────────────────────────────────────────────────────
 // FUNCIÓN PRINCIPAL: esConfundible
 // Determina si existe riesgo de confusión según criterio jurisprudencial INPI.
 // Retorna confundible=true si cualquier eje supera el umbral aplicable.
 // ─────────────────────────────────────────────────────────────────────────────
- 
+
 export function esConfundible(
   marca1: string,
   marca2: string,
@@ -389,21 +427,21 @@ export function esConfundible(
 ): { confundible: boolean; similitud: number; razon: string; detalle?: ResultadoSimilitud } {
   const resultado = calcularSimilitudMarcas(marca1, marca2);
   const mismaClase = clase1 === clase2;
- 
+
   // Umbrales por eje (misma clase vs clases relacionadas)
   // Los umbrales en misma clase son más bajos (INPI aplica criterio más estricto)
   const umbralGrafico   = mismaClase ? 0.72 : 0.85;
   const umbralFonetico  = mismaClase ? 0.72 : 0.85;
   const umbralIdeologico = mismaClase ? 0.85 : 0.92; // ideológico siempre requiere más certeza
- 
+
   const { similitudGrafica: sg, similitudFonetica: sf, similitudIdeologica: si } = resultado;
- 
+
   const confGrafico   = sg / 100 >= umbralGrafico;
   const confFonetico  = sf / 100 >= umbralFonetico;
   const confIdeologico = si / 100 >= umbralIdeologico;
- 
+
   const confundible = confGrafico || confFonetico || confIdeologico;
- 
+
   // Construir razón explicativa
   let razon = '';
   if (confundible) {
@@ -411,7 +449,7 @@ export function esConfundible(
     if (confGrafico)   ejes.push(`gráfico (${sg}%)`);
     if (confFonetico)  ejes.push(`fonético (${sf}%)`);
     if (confIdeologico) ejes.push(`ideológico (${si}%)`);
- 
+
     const similGlobal = resultado.similitudTotal;
     if (similGlobal >= 90) {
       razon = `Marcas prácticamente idénticas — ejes: ${ejes.join(', ')}`;
@@ -421,7 +459,7 @@ export function esConfundible(
       razon = `Confundibilidad por eje ${ejes.join(' y ')} (Art. 3° b) Ley 22.362)`;
     }
   }
- 
+
   return {
     confundible,
     similitud: resultado.similitudTotal,
@@ -429,4 +467,3 @@ export function esConfundible(
     detalle: resultado,
   };
 }
- 
