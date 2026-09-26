@@ -329,6 +329,24 @@ export async function indexarActas(fechaBoletin: Date): Promise<{
  * de la escritura es lo que permite correrlo cien veces mientras se calibran
  * los umbrales sin ensuciar la base con oposiciones de prueba.
  */
+/**
+ * Estados de una marca propia que habilitan usarla como base de vigilancia.
+ *
+ * Son los tres estados "vivos" del enum `EstadoMarca`: la marca existe ante el
+ * INPI y puede fundar una oposición. Quedan afuera BORRADOR (todavía no se
+ * presentó, no hay derecho que oponer) y RECHAZADA, ABANDONADA y VENCIDA.
+ *
+ * ⚠️ Está acá, exportada, y no repetida en cada consulta a propósito: esta
+ *    lista ya estuvo escrita dos veces con los valores 'OPOSICION' y
+ *    'EXAMEN_FONDO', que NO existen en el enum. Prisma rechaza la consulta
+ *    entera en tiempo de ejecución, así que la vigilancia no devolvía ninguna
+ *    marca. Una sola definición para que no vuelva a divergir.
+ *
+ *    Si mañana se agregan estados al enum (p. ej. un EXAMEN_FONDO real), se
+ *    agregan acá y los dos servicios quedan alineados solos.
+ */
+export const ESTADOS_VIGILABLES = ['EN_TRAMITE', 'PUBLICADA', 'CONCEDIDA'] as const;
+
 export async function cruzarBoletin(fechaBoletin: Date): Promise<ResultadoVigilancia> {
   const t0 = Date.now();
   const advertencias: string[] = [];
@@ -340,7 +358,7 @@ export async function cruzarBoletin(fechaBoletin: Date): Promise<ResultadoVigila
   const marcas = await prisma.marca.findMany({
     where: {
       vigilanciaActiva: true,
-      estado: { in: ['EN_TRAMITE', 'PUBLICADA', 'OPOSICION', 'EXAMEN_FONDO', 'CONCEDIDA'] },
+      estado: { in: [...ESTADOS_VIGILABLES] },
     },
     select: {
       id: true,

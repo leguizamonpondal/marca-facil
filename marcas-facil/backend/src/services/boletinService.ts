@@ -14,6 +14,7 @@ import { logger } from '../utils/logger';
 import { esConfundible } from '../utils/helpers';
 import { vencimientoOposicion, vencimientoLegible, diasHastaVencimiento } from '../utils/plazos';
 import { notificacionService } from './notificacionService';
+import { ESTADOS_VIGILABLES } from './vigilanciaService';
 
 export const boletinService = {
 
@@ -64,7 +65,7 @@ export const boletinService = {
     const marcasVigiladas = await prisma.marca.findMany({
       where: {
         vigilanciaActiva: true,
-        estado: { in: ['EN_TRAMITE', 'PUBLICADA', 'OPOSICION', 'EXAMEN_FONDO', 'CONCEDIDA'] },
+        estado: { in: [...ESTADOS_VIGILABLES] },
       },
       include: { user: { select: { id: true, email: true, agenteCuit: true } } },
     });
@@ -113,8 +114,14 @@ export const boletinService = {
             actaOpuesta: entrada.acta,
             denominacionOpuesta: entrada.denominacion,
             claseOpuesta: entrada.claseNiza,
-            titularOpuesto: entrada.titularNombre,
-            plazoVence: plazoOposicion,
+            // El modelo llama `oponenteNombre` al titular de la marca OPUESTA
+            // (así lo documenta el schema). No existe `titularOpuesto`.
+            oponenteNombre: entrada.titularNombre,
+            // Requerido por el modelo y omitido hasta ahora: es la fecha del
+            // boletín, la que hace correr el plazo del art. 15 Ley 22.362.
+            fechaPublicacion: fecha,
+            // El campo es `plazoOposicion`, no `plazoVence`.
+            plazoOposicion: plazoOposicion,
             estado: 'PENDIENTE',
             fundamentosTexto: generarFundamentosOposicion({
               marcaOponente: marcaVigilada.denominacion,
@@ -146,7 +153,11 @@ export const boletinService = {
               `"${marcaVigilada.denominacion}" (similitud ${similitud}%). ` +
               `Plazo para oponerse: hasta el ${vencimientoTexto} a las 23:59 ` +
               `(${diasHastaVencimiento(plazoOposicion)} días corridos).`,
-            urgente: true,
+            // `urgente` no existe en el modelo Alerta. La urgencia ya está en
+            // el tipo (OPOSICION_DETECTADA), y lo que sí hacía falta es la
+            // fecha de vencimiento: el modelo la indexa y es lo que ordena el
+            // panel por plazo más próximo.
+            fechaVencimiento: plazoOposicion,
             marcaId: marcaVigilada.id,
             oposicionId: oposicion.id,
             fechaAlerta: new Date(),
