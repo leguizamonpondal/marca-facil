@@ -89,10 +89,40 @@ model Marca {
   denominacion    String
   tipoMarca       TipoMarca    @default(DENOMINATIVA)
   claseNiza       Int          // 1-45
-  productos       String       // Descripción de productos/servicios
+  // ⚠️ NULLABLE desde la importación de cartera (26/09/2026).
+  //
+  //    El (57) del INPI: la descripción real de productos y servicios que
+  //    ampara la marca. Damlong NO lo guarda —las columnas rubro, cobertura,
+  //    cobertuin y negocio vinieron vacías en las 843 filas del export— así
+  //    que las marcas importadas entran sin este dato y se completa después
+  //    desde el INPI por número de acta.
+  //
+  //    Se evaluó rellenarlo con el encabezado de la clase de Niza y se
+  //    descartó: el encabezado es el alcance máximo de la clase, no el de la
+  //    marca. Una marca registrada sólo para calzado quedaría invocando
+  //    "prendas de vestir, calzado y artículos de sombrerería", y en el cotejo
+  //    de productos afines eso le regala al contrario un argumento.
+  //
+  //    Vacío significa "todavía no lo sabemos" y bloquea la generación del
+  //    escrito de oposición. Un placeholder lo haría indistinguible de un
+  //    dato bueno, que es justo lo que no puede pasar.
+  productos       String?
 
   // Titular
-  titularCuit     String
+  //
+  // ⚠️ NULLABLE por la misma razón, y con una de más: el CUIT del titular no
+  //    está en Damlong (1 de 315 titulares lo tenía cargado; de los 135 que
+  //    corresponden a la cartera vigilada, ninguno). Se recupera del INPI.
+  //
+  //    Se descartó completarlo con el CUIT del estudio: `titularCuit` es el
+  //    CUIT de QUIEN ES TITULAR de la marca, y la legitimación para oponerse
+  //    es del titular, no del agente. Poner el del estudio haría que la app
+  //    generara escritos declarando una titularidad que no existe. El CUIT
+  //    del estudio va en `agenteCuit`, que es donde corresponde y es cierto.
+  //
+  //    `titularNombre` sí viene completo de Damlong (843 de 843), así que de
+  //    quién es cada marca no se pierde: falta la clave fiscal, no el dueño.
+  titularCuit     String?
   titularNombre   String
 
   // Estado y fechas
