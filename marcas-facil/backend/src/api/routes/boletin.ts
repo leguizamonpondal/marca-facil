@@ -12,6 +12,7 @@ import { boletinService } from '../../services/boletinService';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles, descargarPdf } from '../../services/boletinPortal';
 import { extraerTextoDelPdf, parsearActas } from '../../services/boletinParser';
 import { cruzarBoletin, cruzarUnaMarca, indexarActas, agruparPorActa } from '../../services/vigilanciaService';
@@ -420,12 +421,28 @@ router.get('/vigilancia/panel', (req, res: Response) => {
   if (!exigirToken(req, res)) return;
   const token = encodeURIComponent(String(req.query.token));
 
+  // ⚠️ SIN ESTO LA PANTALLA NO FUNCIONA Y NO AVISA.
+  //
+  // `app.use(helmet())` manda `Content-Security-Policy: script-src 'self'`,
+  // que bloquea TODO script inline. El navegador no muestra ningún error a la
+  // vista: la página carga, se ve bien, y el botón simplemente no hace nada.
+  //
+  // La salida es un nonce por respuesta: el navegador ejecuta sólo el script
+  // que lo lleva. Queda más cerrado que el default de helmet, porque acá
+  // `default-src` es 'none' y lo único que se permite es este script, este
+  // estilo y las llamadas al propio backend.
+  const nonce = crypto.randomBytes(16).toString('base64');
+  res.setHeader(
+    'Content-Security-Policy',
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
+      `connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'`
+  );
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vigilancia del Boletín</title>
-<style>
+<style nonce="${nonce}">
   :root { --tinta:#1a1a1a; --suave:#666; --linea:#e2e2e2; --marca:#1a3a6b;
           --alerta:#b3261e; --ambar:#c77700; --fondo:#fafbfc }
   * { box-sizing:border-box }
@@ -440,7 +457,7 @@ router.get('/vigilancia/panel', (req, res: Response) => {
   button.secundario { background:#fff; color:var(--marca); border:1px solid var(--marca) }
   button:disabled { opacity:.5; cursor:default }
   input[type=date] { padding:9px; border:1px solid var(--linea); border-radius:6px; font-size:14px }
-  label { font-size:14px; color:var(--suave) }
+  label, .estado { font-size:14px; color:var(--suave) }
 
   .plazo { border:1px solid var(--linea); border-left:4px solid var(--marca);
            border-radius:0 8px 8px 0; padding:14px 18px; margin:20px 0 }
@@ -481,12 +498,12 @@ router.get('/vigilancia/panel', (req, res: Response) => {
   <button id="btn">Revisar</button>
   <label>Boletín del:</label>
   <input type="date" id="fecha">
-  <span id="estado" style="font-size:14px;color:var(--suave)"></span>
+  <span id="estado" class="estado"></span>
 </div>
 
 <div id="salida"></div>
 
-<script>
+<script nonce="${nonce}">
 const TOKEN = ${JSON.stringify(token)};
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s)

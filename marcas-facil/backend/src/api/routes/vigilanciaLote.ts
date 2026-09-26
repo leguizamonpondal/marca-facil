@@ -31,6 +31,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import * as crypto from 'crypto';
 import { logger } from '../../utils/logger';
 import { ultimoMiercoles } from '../../services/boletinPortal';
 import { cruzarUnaMarca, indexarActas, type Coincidencia } from '../../services/vigilanciaService';
@@ -169,12 +170,22 @@ router.get('/', (req: Request, res: Response) => {
   if (!exigirToken(req, res)) return;
   const token = encodeURIComponent(String(req.query.token));
 
+  // Mismo caso que el panel de /boletin/vigilancia/panel: `app.use(helmet())`
+  // manda `script-src 'self'` y bloquea todo script inline sin avisar nada a
+  // la vista. Esta pantalla estuvo muerta desde que se escribió — cargaba
+  // bien y el botón no hacía nada. Un nonce por respuesta lo resuelve.
+  const nonce = crypto.randomBytes(16).toString('base64');
+  res.setHeader(
+    'Content-Security-Policy',
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
+      `connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'`
+  );
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!DOCTYPE html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cruce de cartera contra el Boletín</title>
-<style>
+<style nonce="${nonce}">
   :root { --tinta:#1a1a1a; --suave:#666; --linea:#e2e2e2; --marca:#1a3a6b; --alerta:#b3261e; }
   * { box-sizing:border-box }
   body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
@@ -205,6 +216,9 @@ router.get('/', (req: Request, res: Response) => {
   .resumen { display:flex; gap:26px; flex-wrap:wrap; margin:20px 0; padding:14px 0;
              border-top:1px solid var(--linea); border-bottom:1px solid var(--linea) }
   .dato b { display:block; font-size:21px; font-weight:600 }
+  .estado { font-size:14px; color:var(--suave) }
+  .sep22 { margin-top:22px }
+  .sep20 { margin-top:20px }
   .dato span { font-size:12px; color:var(--suave) }
 </style></head><body>
 
@@ -224,14 +238,14 @@ router.get('/', (req: Request, res: Response) => {
 
 <div class="fila">
   <button id="btn">Cruzar</button>
-  <label style="font-size:14px;color:var(--suave)">Boletín del:</label>
+  <label class="estado">Boletín del:</label>
   <input type="date" id="fecha">
-  <span id="estado" style="font-size:14px;color:var(--suave)"></span>
+  <span id="estado" class="estado"></span>
 </div>
 
 <div id="salida"></div>
 
-<script>
+<script nonce="${nonce}">
 const TOKEN = ${JSON.stringify(token)};
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -278,7 +292,7 @@ function pintar(d) {
   }
 
   if (!d.coincidencias.length) {
-    h += '<p style="margin-top:22px">Ninguna coincidencia. Recordá que el cotejo solo alcanza a las '
+    h += '<p class="sep22">Ninguna coincidencia. Recordá que el cotejo solo alcanza a las '
        + d.actasCotejables.toLocaleString('es-AR') + ' actas con denominación en el texto.</p>';
     $('salida').innerHTML = h;
     return;
@@ -299,7 +313,7 @@ function pintar(d) {
       + '</tr>';
   }
   h += '</tbody></table>'
-    + '<div class="aviso" style="margin-top:20px"><b>Los umbrales todavía no están calibrados.</b> '
+    + '<div class="aviso" class="sep20"><b>Los umbrales todavía no están calibrados.</b> '
     + 'Esta lista es un borrador: sirve para decidir qué umbrales mover, no para presentar nada.</div>';
 
   $('salida').innerHTML = h;
