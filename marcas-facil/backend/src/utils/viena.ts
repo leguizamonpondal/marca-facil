@@ -38,9 +38,25 @@
  *    edición vigente, de Viena y de Niza.
  */
 
-export const EDICION_VIENA = 'VCL10' as const;
+import {
+  CATEGORIAS,
+  DIVISIONES,
+  SECCIONES,
+  AUXILIARES,
+  CON_AUXILIARES,
+  EDICION,
+  VIGENTE_DESDE,
+} from './vienaTabla';
 
-/** Las 29 categorías. Fuente: publicación oficial de la OMPI. */
+export const EDICION_VIENA = EDICION;
+export { CATEGORIAS, DIVISIONES, SECCIONES, AUXILIARES, CON_AUXILIARES, VIGENTE_DESDE };
+
+/**
+ * Las 29 categorías, en castellano, para mostrar en pantalla.
+ *
+ * La tabla oficial (`vienaTabla.ts`) está en inglés porque es el texto que
+ * publica la OMPI y no se toca: es la fuente. Esto es sólo la rotulación.
+ */
 export const CATEGORIAS_VIENA: Record<number, string> = {
   1: 'Cuerpos celestes, fenómenos naturales, mapas geográficos',
   2: 'Seres humanos',
@@ -102,9 +118,15 @@ export function parsearCodigoViena(texto: string): CodigoViena | null {
   const categoria = Number(m[2]);
   const division = Number(m[3]);
   const seccion = Number(m[4]);
-  if (categoria < 1 || categoria > 29) return null;
+  const auxiliar = m[1] === 'A';
 
-  return { categoria, division, seccion, auxiliar: m[1] === 'A', crudo: texto.trim() };
+  // No alcanza con que tenga forma de código: **tiene que existir en VCL10**.
+  // Un código inventado no da error, da una coincidencia contra una sección
+  // que no es — y eso es peor que no tener el dato.
+  const clave = `${categoria}.${division}.${seccion}`;
+  if (!(auxiliar ? AUXILIARES : SECCIONES)[clave]) return null;
+
+  return { categoria, division, seccion, auxiliar, crudo: texto.trim() };
 }
 
 /** Parsea una lista y **reporta** lo que no pudo leer, en vez de descartarlo callado. */
