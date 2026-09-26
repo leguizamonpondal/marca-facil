@@ -409,3 +409,125 @@ export async function cruzarBoletin(fechaBoletin: Date): Promise<ResultadoVigila
     advertencias,
   };
 }
+
+// ── Agrupado para mostrar ────────────────────────────────────────────────────
+
+/**
+ * Una marca propia que detectó una solicitud, con todas las clases por las que
+ * la detectó juntas en una línea.
+ */
+export interface MarcaAfectada {
+  /** La denominación tal como está registrada. */
+  denominacion: string;
+  /** Las clases propias desde las que se detectó, ordenadas. */
+  clases: number[];
+  /**
+   * Los registros concretos que sostienen esto.
+   *
+   * Son varios y no uno porque la cartera tiene la misma denominación
+   * registrada más de una vez en la misma clase —renovaciones cargadas como
+   * registro aparte—. Para MOSTRAR da igual; para FORMULAR la oposición hay
+   * que saber sobre cuál se funda, así que los ids se conservan.
+   */
+  marcaIds: string[];
+  /** La similitud más alta entre todos los pares de esta marca con el acta. */
+  similitudMaxima: number;
+  motivo: MotivoCoincidencia;
+  ejeQueDisparo?: 'gráfico' | 'fonético' | 'ideológico';
+  /** La explicación del par más fuerte: es el que hay que leer primero. */
+  explicacion: string;
+}
+
+/** Una solicitud del Boletín que hay que mirar, con todo lo que la detectó. */
+export interface SolicitudDetectada {
+  entradaId: string;
+  acta: string;
+  denominacion: string;
+  clase: number;
+  titular: string;
+  /** La similitud más alta de todas: con esto se ordena la lista. */
+  similitudMaxima: number;
+  marcasAfectadas: MarcaAfectada[];
+  /** Cuántos pares marca-clase la detectaron. Para entender el ruido. */
+  paresQueLaDetectaron: number;
+  accion: string;
+}
+
+/**
+ * Junta las coincidencias por solicitud del Boletín.
+ *
+ * ── Por qué hace falta ───────────────────────────────────────────────────────
+ *
+ * El motor compara PARES marca-clase contra acta, que es lo correcto: cada par
+ * es un cotejo legítimo y con fundamento propio. Pero como salida es
+ * engañoso. En el boletín del 23/09 las 20 coincidencias eran **cinco
+ * solicitudes**: `X LA VIDA` está registrada en seis clases y en dos grafías,
+ * así que la misma solicitud `ALAVIDA!` aparecía seis veces.
+ *
+ * Quien lee eso no tiene veinte cosas que revisar: tiene cinco. Y para cada
+ * una necesita saber desde qué marcas y qué clases le toca oponerse, que es
+ * justamente lo que se pierde cuando se listan sueltas.
+ *
+ * Esto NO cambia lo que se guarda: la oposición se sigue fundando en una marca
+ * concreta. Es la forma de mirarlo, no el criterio.
+ */
+export function agruparPorActa(coincidencias: Coincidencia[]): SolicitudDetectada[] {
+  const porActa = new Map<string, SolicitudDetectada>();
+
+  for (const c of coincidencias) {
+    let s = porActa.get(c.acta);
+    if (!s) {
+      s = {
+        entradaId: c.entradaId,
+        acta: c.acta,
+        denominacion: c.actaDenominacion,
+        clase: c.actaClase,
+        titular: c.actaTitular,
+        similitudMaxima: 0,
+        marcasAfectadas: [],
+        paresQueLaDetectaron: 0,
+        accion: c.accion,
+      };
+      porActa.set(c.acta, s);
+    }
+
+    s.paresQueLaDetectaron++;
+    if (c.similitud > s.similitudMaxima) s.similitudMaxima = c.similitud;
+
+    // Se agrupa por DENOMINACIÓN y no por id: dos registros de la misma marca
+    // en la misma clase son, para quien lee, una sola marca.
+    let m = s.marcasAfectadas.find((x) => x.denominacion === c.marcaDenominacion);
+    if (!m) {
+      m = {
+        denominacion: c.marcaDenominacion,
+        clases: [],
+        marcaIds: [],
+        similitudMaxima: c.similitud,
+        motivo: c.motivo,
+        ejeQueDisparo: c.ejeQueDisparo,
+        explicacion: c.explicacion,
+      };
+      s.marcasAfectadas.push(m);
+    }
+
+    if (!m.clases.includes(c.marcaClase)) m.clases.push(c.marcaClase);
+    if (!m.marcaIds.includes(c.marcaId)) m.marcaIds.push(c.marcaId);
+
+    // La explicación que queda es la del par más fuerte, que es el que
+    // conviene leer primero.
+    if (c.similitud > m.similitudMaxima) {
+      m.similitudMaxima = c.similitud;
+      m.motivo = c.motivo;
+      m.ejeQueDisparo = c.ejeQueDisparo;
+      m.explicacion = c.explicacion;
+    }
+  }
+
+  const salida = [...porActa.values()];
+  for (const s of salida) {
+    s.marcasAfectadas.sort((a, b) => b.similitudMaxima - a.similitudMaxima);
+    for (const m of s.marcasAfectadas) m.clases.sort((a, b) => a - b);
+  }
+  // Lo más parecido primero: es el orden en que conviene revisarlas.
+  return salida.sort((a, b) => b.similitudMaxima - a.similitudMaxima);
+}

@@ -17,7 +17,7 @@ import { notificacionService } from './notificacionService';
 // cruce. Acá se importa para que lo que la app GUARDA sea exactamente lo que
 // le MUESTRA al cliente; antes esta función tenía su propio cotejo, más
 // simple, y los dos resultados no coincidían.
-import { cruzarBoletin } from './vigilanciaService';
+import { cruzarBoletin, agruparPorActa, type SolicitudDetectada } from './vigilanciaService';
 
 export const boletinService = {
 
@@ -86,6 +86,8 @@ export const boletinService = {
     yaExistian: number;
     entradasMarcadasProcesadas: number;
     detalle: { marca: string; acta: string; actaDenominacion: string; similitud: number; motivo: string }[];
+    /** Las mismas coincidencias, juntadas por solicitud: es lo que hay que mirar. */
+    solicitudes: SolicitudDetectada[];
     advertencias: string[];
   }> {
     const { seco = false, limite } = opciones;
@@ -114,6 +116,7 @@ export const boletinService = {
         yaExistian: 0,
         entradasMarcadasProcesadas: 0,
         detalle,
+        solicitudes: [],
         advertencias: cruce.advertencias,
       };
     }
@@ -257,6 +260,7 @@ export const boletinService = {
       yaExistian,
       entradasMarcadasProcesadas,
       detalle,
+      solicitudes: agruparPorActa(cruce.coincidencias),
       advertencias: cruce.advertencias,
     };
   },
