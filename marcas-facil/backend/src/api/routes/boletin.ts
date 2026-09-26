@@ -408,6 +408,173 @@ router.get('/vigilancia/escribir', async (req, res: Response) => {
   }
 });
 
+// ── GET /api/boletin/vigilancia/panel ────────────────────────────────────────
+//
+// La pantalla. Lo mismo que devuelve `/vigilancia/cruzar`, pero legible.
+//
+// Existe porque el JSON crudo deja de ser leíble apenas hay más de tres
+// coincidencias, y lo que importa acá es un dato que se lee de un vistazo o no
+// se lee: cuántos días quedan para oponerse. También es el esqueleto de lo que
+// va a ver el cliente, así que conviene que exista temprano.
+router.get('/vigilancia/panel', (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+  const token = encodeURIComponent(String(req.query.token));
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vigilancia del Boletín</title>
+<style>
+  :root { --tinta:#1a1a1a; --suave:#666; --linea:#e2e2e2; --marca:#1a3a6b;
+          --alerta:#b3261e; --ambar:#c77700; --fondo:#fafbfc }
+  * { box-sizing:border-box }
+  body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;
+         max-width:1000px; margin:0 auto; padding:28px 20px 80px;
+         color:var(--tinta); line-height:1.5 }
+  h1 { font-size:22px; margin:0 0 4px }
+  .sub { color:var(--suave); font-size:14px; margin-bottom:22px }
+  .fila { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:14px 0 }
+  button { background:var(--marca); color:#fff; border:0; padding:11px 22px;
+           border-radius:6px; font-size:15px; cursor:pointer }
+  button.secundario { background:#fff; color:var(--marca); border:1px solid var(--marca) }
+  button:disabled { opacity:.5; cursor:default }
+  input[type=date] { padding:9px; border:1px solid var(--linea); border-radius:6px; font-size:14px }
+  label { font-size:14px; color:var(--suave) }
+
+  .plazo { border:1px solid var(--linea); border-left:4px solid var(--marca);
+           border-radius:0 8px 8px 0; padding:14px 18px; margin:20px 0 }
+  .plazo.apura { border-left-color:var(--alerta); background:#fff5f5 }
+  .plazo b { font-size:19px }
+  .plazo .dias { font-size:13px; color:var(--suave) }
+
+  .resumen { display:flex; gap:26px; flex-wrap:wrap; margin:20px 0; padding:14px 0;
+             border-top:1px solid var(--linea); border-bottom:1px solid var(--linea) }
+  .dato b { display:block; font-size:21px; font-weight:600 }
+  .dato span { font-size:12px; color:var(--suave) }
+
+  .sol { border:1px solid var(--linea); border-radius:8px; padding:16px 18px; margin:14px 0 }
+  .sol:hover { background:var(--fondo) }
+  .sol h2 { font-size:17px; margin:0 0 2px; font-weight:600 }
+  .sol .meta { font-size:13px; color:var(--suave); margin-bottom:12px }
+  .pct { float:right; font-weight:600; font-size:17px }
+  .pct.alto { color:var(--alerta) }
+
+  .mia { border-top:1px solid var(--linea); padding:10px 0 2px; font-size:13px }
+  .mia:first-of-type { border-top:0 }
+  .mia .den { font-weight:600 }
+  .chip { display:inline-block; background:#eceef1; padding:1px 8px;
+          border-radius:10px; font-size:11px; margin-left:4px }
+  .porque { color:var(--suave); font-size:12px; margin-top:3px }
+
+  .aviso { background:#fff8e1; border-left:3px solid var(--ambar); padding:12px 16px;
+           font-size:13px; border-radius:0 6px 6px 0; margin:16px 0 }
+  .vacio { color:var(--suave); padding:28px 0; text-align:center }
+  .pie { margin-top:34px; padding-top:16px; border-top:1px solid var(--linea);
+         font-size:12px; color:var(--suave) }
+</style></head><body>
+
+<h1>Vigilancia del Boletín</h1>
+<div class="sub">Toda la cartera contra las actas publicadas. Leer no escribe nada.</div>
+
+<div class="fila">
+  <button id="btn">Revisar</button>
+  <label>Boletín del:</label>
+  <input type="date" id="fecha">
+  <span id="estado" style="font-size:14px;color:var(--suave)"></span>
+</div>
+
+<div id="salida"></div>
+
+<script>
+const TOKEN = ${JSON.stringify(token)};
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s)
+  .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+$('btn').onclick = async () => {
+  $('btn').disabled = true;
+  $('estado').textContent = 'Revisando…';
+  $('salida').innerHTML = '';
+  try {
+    const qs = '?token=' + TOKEN + ($('fecha').value ? '&fecha=' + $('fecha').value : '');
+    const r = await fetch('/api/boletin/vigilancia/cruzar' + qs);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detalle || d.error || 'Error ' + r.status);
+    pintar(d);
+    $('estado').textContent = d.milisegundos + ' ms';
+  } catch (e) {
+    $('salida').innerHTML = '<div class="aviso"><b>No se pudo revisar.</b><br>' + esc(e.message) + '</div>';
+    $('estado').textContent = '';
+  } finally {
+    $('btn').disabled = false;
+  }
+};
+
+function pintar(d) {
+  let h = '';
+
+  // El plazo primero y grande: es el único dato que, si no se ve, cuesta caro.
+  const apura = d.diasRestantes <= 10;
+  h += '<div class="plazo' + (apura ? ' apura' : '') + '">' +
+       '<b>Vence el ' + esc(d.vencimiento) + '</b>' +
+       '<div class="dias">' + d.diasRestantes + ' días corridos · boletín del ' +
+       esc(d.fecha) + '</div></div>';
+
+  h += '<div class="resumen">' +
+    dato(d.solicitudesADetectar, 'solicitudes a revisar') +
+    dato(d.marcasVigiladas, 'marcas vigiladas') +
+    dato(d.entradasRevisadas, 'actas publicadas') +
+    dato(d.comparaciones.toLocaleString('es-AR'), 'comparaciones') +
+    '</div>';
+
+  for (const a of (d.advertencias || [])) {
+    h += '<div class="aviso">' + esc(a) + '</div>';
+  }
+
+  if (!d.solicitudes || d.solicitudes.length === 0) {
+    h += '<div class="vacio">Ninguna solicitud de este boletín se parece a las marcas vigiladas.</div>';
+  } else {
+    for (const s of d.solicitudes) h += tarjeta(s);
+  }
+
+  h += '<div class="pie">Nada de esto se guardó: la pantalla sólo lee. ' +
+       'Los umbrales de confundibilidad todavía no están calibrados, así que ' +
+       'conviene leer el fundamento de cada coincidencia y no sólo el porcentaje.</div>';
+
+  $('salida').innerHTML = h;
+}
+
+function dato(valor, etiqueta) {
+  return '<div class="dato"><b>' + esc(valor) + '</b><span>' + esc(etiqueta) + '</span></div>';
+}
+
+function tarjeta(s) {
+  let h = '<div class="sol">';
+  h += '<span class="pct' + (s.similitudMaxima >= 80 ? ' alto' : '') + '">' +
+       s.similitudMaxima + '%</span>';
+  h += '<h2>' + esc(s.denominacion) + '</h2>';
+  h += '<div class="meta">Acta ' + esc(s.acta) + ' · clase ' + s.clase +
+       ' · ' + esc(s.titular) + '</div>';
+
+  for (const m of s.marcasAfectadas) {
+    const clases = m.clases.length === 1
+      ? 'clase ' + m.clases[0]
+      : 'clases ' + m.clases.join(', ');
+    h += '<div class="mia">' +
+         '<span class="den">' + esc(m.denominacion) + '</span>' +
+         '<span class="chip">' + esc(clases) + '</span>' +
+         '<span class="chip">' + m.similitudMaxima + '%</span>' +
+         (m.ejeQueDisparo ? '<span class="chip">eje ' + esc(m.ejeQueDisparo) + '</span>' : '') +
+         '<div class="porque">' + esc(m.explicacion) + '</div>' +
+         '</div>';
+  }
+  return h + '</div>';
+}
+</script>
+</body></html>`);
+});
+
 router.use(authenticate);
 
 // ── GET /api/boletin — Listar boletines descargados ──────────────────────────
