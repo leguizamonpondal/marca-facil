@@ -14,7 +14,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles, descargarPdf } from '../../services/boletinPortal';
 import { extraerTextoDelPdf, parsearActas } from '../../services/boletinParser';
-import { cruzarBoletin, cruzarUnaMarca, indexarActas } from '../../services/vigilanciaService';
+import { cruzarBoletin, cruzarUnaMarca, indexarActas, agruparPorActa } from '../../services/vigilanciaService';
 import { descargarBoletinesDeLaFecha, limpiar as limpiarTemporales } from '../../services/boletinDescarga';
 import { logger } from '../../utils/logger';
 
@@ -336,15 +336,23 @@ router.get('/vigilancia/cruzar', async (req, res: Response) => {
     }
 
     const r = await cruzarBoletin(fecha);
+    const solicitudes = agruparPorActa(r.coincidencias);
 
     return res.json({
       ...r,
       fecha: r.fecha.toLocaleDateString('es-AR'),
-      coincidencias: r.coincidencias.slice(0, 100),
+      // Lo que hay que mirar: una entrada por solicitud del Boletín, con las
+      // marcas y clases propias que la detectaron.
+      solicitudesADetectar: solicitudes.length,
+      solicitudes,
+      // Los pares sueltos quedan disponibles pero fuera del camino: sirven
+      // para auditar el cotejo, no para decidir.
       totalCoincidencias: r.coincidencias.length,
+      coincidencias: r.coincidencias.slice(0, 100),
       aviso:
         'No se creó ninguna oposición ni alerta: esto muestra lo que el motor encontraría. ' +
-        'Los umbrales todavía no están calibrados.',
+        `${r.coincidencias.length} pares marca-clase corresponden a ${solicitudes.length} ` +
+        'solicitudes distintas. Los umbrales todavía no están calibrados.',
     });
   } catch (err: any) {
     logger.error(`[Vigilancia] Falló el cruce: ${err.message}`);
