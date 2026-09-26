@@ -11,10 +11,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { prisma } from '../db/client';
 import { logger } from '../utils/logger';
-import { esConfundible } from '../utils/helpers';
 import { vencimientoOposicion, vencimientoLegible, diasHastaVencimiento } from '../utils/plazos';
 import { notificacionService } from './notificacionService';
-import { ESTADOS_VIGILABLES } from './vigilanciaService';
+// `cruzarBoletin` es el motor de cotejo, el mismo que usa el endpoint de
+// cruce. Acá se importa para que lo que la app GUARDA sea exactamente lo que
+// le MUESTRA al cliente; antes esta función tenía su propio cotejo, más
+// simple, y los dos resultados no coincidían.
+import { cruzarBoletin } from './vigilanciaService';
 
 export const boletinService = {
 
@@ -44,147 +47,218 @@ export const boletinService = {
   },
 
   /**
-   * Procesa el boletín descargado y cruza con marcas de usuarios.
-   * Genera alertas de oposición cuando detecta confundibilidad.
+   * Corre la vigilancia de una fecha y deja registrada cada coincidencia como
+   * una oposición en estado PENDIENTE, con su alerta.
+   *
+   * ── Por qué esta función se reescribió (26/09/2026) ──────────────────────
+   *
+   * Antes tenía su propio cotejo: recorría las entradas contra las marcas y
+   * decidía con `esConfundible()`, que aplica umbrales fijos de 0,72 y 0,85
+   * sobre los tres ejes y nada más. El endpoint de cruce, en cambio, usa
+   * `cruzarBoletin()`, que aplica afinidad de clases, cuasi-identidad,
+   * vigilancia ampliada para notorias y mot vedette, e informa por qué eje
+   * entró cada coincidencia.
+   *
+   * O sea: **la app le mostraba al cliente un resultado y guardaba otro.**
+   * Nadie lo había notado porque el camino que escribe nunca se había
+   * ejecutado. Ahora las dos usan el mismo motor, que es la única forma de
+   * que lo que se ve sea lo que se guarda.
+   *
+   * ── El modo seco ─────────────────────────────────────────────────────────
+   *
+   * `seco: true` calcula todo pero no escribe nada: ni oposiciones, ni
+   * alertas, ni avisos push, ni la marca de `procesado` en las entradas.
+   * Existe porque esta función tiene tres efectos irreversibles —crea
+   * registros, notifica al cliente y consume el boletín— y hacía falta poder
+   * verla funcionar antes de dejarla suelta sobre 3.685 actas.
+   *
+   * `limite` corta después de N coincidencias escritas. Para la primera
+   * corrida de verdad: una sola, se revisa, y recién después el resto.
    */
-  async procesarVigilancia(fechaBoletin?: Date): Promise<{ alertasGeneradas: number }> {
+  async procesarVigilancia(
+    fechaBoletin?: Date,
+    opciones: { seco?: boolean; limite?: number } = {}
+  ): Promise<{
+    seco: boolean;
+    coincidenciasEncontradas: number;
+    oposicionesCreadas: number;
+    alertasCreadas: number;
+    yaExistian: number;
+    entradasMarcadasProcesadas: number;
+    detalle: { marca: string; acta: string; actaDenominacion: string; similitud: number; motivo: string }[];
+    advertencias: string[];
+  }> {
+    const { seco = false, limite } = opciones;
     const fecha = fechaBoletin || getUltimoMiercoles();
-    logger.info(`🔍 Procesando vigilancia marcaria para boletín: ${fecha.toISOString().split('T')[0]}`);
 
-    // Obtener entradas del boletín sin procesar
-    const entradasNuevas = await prisma.boletinEntrada.findMany({
-      where: { fechaBoletin: fecha, procesado: false },
-    });
+    logger.info(
+      `🔍 [Vigilancia] ${seco ? 'SECO — no escribe — ' : ''}` +
+        `boletín del ${fecha.toLocaleDateString('es-AR')}` +
+        (limite ? ` · límite ${limite}` : '')
+    );
 
-    if (entradasNuevas.length === 0) {
-      logger.info('  No hay entradas nuevas para procesar');
-      return { alertasGeneradas: 0 };
+    // El mismo motor que ve el cliente. Ver el comentario de arriba.
+    const cruce = await cruzarBoletin(fecha);
+
+    const detalle: { marca: string; acta: string; actaDenominacion: string; similitud: number; motivo: string }[] = [];
+    let oposicionesCreadas = 0;
+    let alertasCreadas = 0;
+    let yaExistian = 0;
+
+    if (cruce.coincidencias.length === 0) {
+      return {
+        seco,
+        coincidenciasEncontradas: 0,
+        oposicionesCreadas: 0,
+        alertasCreadas: 0,
+        yaExistian: 0,
+        entradasMarcadasProcesadas: 0,
+        detalle,
+        advertencias: cruce.advertencias,
+      };
     }
 
-    // Obtener todas las marcas con vigilancia activa
-    const marcasVigiladas = await prisma.marca.findMany({
-      where: {
-        vigilanciaActiva: true,
-        estado: { in: [...ESTADOS_VIGILABLES] },
+    // Los datos que la oposición necesita de la marca propia y que el cruce no
+    // devuelve. Se traen de una sola vez y no de a una por coincidencia.
+    const marcas = await prisma.marca.findMany({
+      where: { id: { in: [...new Set(cruce.coincidencias.map((c) => c.marcaId))] } },
+      select: {
+        id: true, userId: true, denominacion: true, claseNiza: true,
+        acta: true, resolucion: true, productos: true, titularNombre: true,
       },
-      include: { user: { select: { id: true, email: true, agenteCuit: true } } },
     });
+    // El tipo explícito no es decorativo: sin él, `new Map(array.map(...))`
+    // infiere Map<unknown, unknown> y se pierde todo el tipado de la marca.
+    type MarcaBase = {
+      id: string; userId: string; denominacion: string; claseNiza: number;
+      acta: string | null; resolucion: string | null;
+      productos: string | null; titularNombre: string;
+    };
+    const porId = new Map<string, MarcaBase>(
+      (marcas as MarcaBase[]).map((m) => [m.id, m])
+    );
 
-    let alertasGeneradas = 0;
-
-    // 30 días corridos desde el día siguiente a la publicación, hasta las
-    // 23:59 argentinas del último día. Caiga donde caiga, vence: no se corre
-    // al hábil siguiente. Criterio confirmado por el matriculado el
-    // 23/09/2026. La cuenta vive en utils/plazos.ts, donde está explicada.
-    //
-    // ⚠️ Acá decía `addCalendarDays(fecha, 31)`, un día de más: le habría
-    //    avisado al cliente que tenía tiempo hasta el día después del
-    //    vencimiento real.
     const plazoOposicion = vencimientoOposicion(fecha);
     const vencimientoTexto = vencimientoLegible(plazoOposicion);
 
-    for (const entrada of entradasNuevas) {
-      for (const marcaVigilada of marcasVigiladas) {
-        // Solo comparar en la misma clase (oposición directa) o clases relacionadas
-        if (!clasesRelacionadas(marcaVigilada.claseNiza, entrada.claseNiza)) continue;
+    for (const c of cruce.coincidencias) {
+      if (limite !== undefined && oposicionesCreadas >= limite) break;
 
-        const { confundible, similitud, razon } = esConfundible(
-          marcaVigilada.denominacion,
-          entrada.denominacion,
-          marcaVigilada.claseNiza,
-          entrada.claseNiza
-        );
+      const marca = porId.get(c.marcaId);
+      if (!marca) continue;
 
-        if (!confundible) continue;
-
-        logger.info(`  ⚠️  CONFUNDIBLE: "${marcaVigilada.denominacion}" vs "${entrada.denominacion}" — similitud ${similitud}%`);
-
-        // Verificar que no existe ya una alerta/oposición para esta combinación
-        const existente = await prisma.oposicion.findFirst({
-          where: { marcaOponenteId: marcaVigilada.id, actaOpuesta: entrada.acta },
-        });
-        if (existente) continue;
-
-        // Crear oposición pendiente
-        const oposicion = await prisma.oposicion.create({
-          data: {
-            userId: marcaVigilada.userId,
-            marcaOponenteId: marcaVigilada.id,
-            boletinEntradaId: entrada.id,
-            actaOpuesta: entrada.acta,
-            denominacionOpuesta: entrada.denominacion,
-            claseOpuesta: entrada.claseNiza,
-            // El modelo llama `oponenteNombre` al titular de la marca OPUESTA
-            // (así lo documenta el schema). No existe `titularOpuesto`.
-            oponenteNombre: entrada.titularNombre,
-            // Requerido por el modelo y omitido hasta ahora: es la fecha del
-            // boletín, la que hace correr el plazo del art. 15 Ley 22.362.
-            fechaPublicacion: fecha,
-            // El campo es `plazoOposicion`, no `plazoVence`.
-            plazoOposicion: plazoOposicion,
-            estado: 'PENDIENTE',
-            fundamentosTexto: generarFundamentosOposicion({
-              marcaOponente: marcaVigilada.denominacion,
-              actaOponente: marcaVigilada.acta || '',
-              resolucionOponente: marcaVigilada.resolucion || '',
-              claseOponente: marcaVigilada.claseNiza,
-              productosOponente: marcaVigilada.productos,
-              marcaOpuesta: entrada.denominacion,
-              actaOpuesta: entrada.acta,
-              claseOpuesta: entrada.claseNiza,
-              productosOpuestos: entrada.productos || '',
-              titularOponente: marcaVigilada.titularNombre,
-              similitud,
-              razon,
-            }),
-          },
-        });
-
-        // Crear alerta urgente para el usuario
-        await prisma.alerta.create({
-          data: {
-            userId: marcaVigilada.userId,
-            tipo: 'OPOSICION_DETECTADA',
-            titulo: `⚠️ Marca confundible detectada: "${entrada.denominacion}"`,
-            descripcion:
-              `Se publicó en el Boletín del ${fecha.toLocaleDateString('es-AR')} la solicitud de marca ` +
-              `"${entrada.denominacion}" (Acta ${entrada.acta}, Clase ${entrada.claseNiza}) ` +
-              `por ${entrada.titularNombre}, que es confundible con tu marca ` +
-              `"${marcaVigilada.denominacion}" (similitud ${similitud}%). ` +
-              `Plazo para oponerse: hasta el ${vencimientoTexto} a las 23:59 ` +
-              `(${diasHastaVencimiento(plazoOposicion)} días corridos).`,
-            // `urgente` no existe en el modelo Alerta. La urgencia ya está en
-            // el tipo (OPOSICION_DETECTADA), y lo que sí hacía falta es la
-            // fecha de vencimiento: el modelo la indexa y es lo que ordena el
-            // panel por plazo más próximo.
-            fechaVencimiento: plazoOposicion,
-            marcaId: marcaVigilada.id,
-            oposicionId: oposicion.id,
-            fechaAlerta: new Date(),
-          },
-        });
-
-        // Enviar push notification
-        await notificacionService.enviarAlertaOposicion(
-          marcaVigilada.userId,
-          marcaVigilada.denominacion,
-          entrada.denominacion,
-          entrada.acta,
-          plazoOposicion
-        );
-
-        alertasGeneradas++;
-      }
-
-      // Marcar entrada como procesada
-      await prisma.boletinEntrada.update({
-        where: { id: entrada.id },
-        data: { procesado: true },
+      // Una oposición por par marca-acta. Si la vigilancia se vuelve a correr
+      // sobre la misma fecha, no se duplica.
+      const existente = await prisma.oposicion.findFirst({
+        where: { marcaOponenteId: marca.id, actaOpuesta: c.acta },
+        select: { id: true },
       });
+      if (existente) { yaExistian++; continue; }
+
+      detalle.push({
+        marca: `${marca.denominacion} (cl. ${marca.claseNiza})`,
+        acta: c.acta,
+        actaDenominacion: c.actaDenominacion,
+        similitud: c.similitud,
+        motivo: c.ejeQueDisparo ? `${c.motivo} · eje ${c.ejeQueDisparo}` : c.motivo,
+      });
+
+      if (seco) continue;
+
+      const oposicion = await prisma.oposicion.create({
+        data: {
+          userId: marca.userId,
+          marcaOponenteId: marca.id,
+          boletinEntradaId: c.entradaId,
+          actaOpuesta: c.acta,
+          denominacionOpuesta: c.actaDenominacion,
+          claseOpuesta: c.actaClase,
+          // El modelo llama `oponenteNombre` al titular de la marca OPUESTA
+          // (así lo documenta el schema). No existe `titularOpuesto`.
+          oponenteNombre: c.actaTitular,
+          // Requerido por el modelo: es la fecha del boletín, la que hace
+          // correr el plazo del art. 15 de la Ley 22.362.
+          fechaPublicacion: fecha,
+          // El campo es `plazoOposicion`, no `plazoVence`.
+          plazoOposicion,
+          estado: 'PENDIENTE',
+          fundamentosTexto: generarFundamentosOposicion({
+            marcaOponente: marca.denominacion,
+            actaOponente: marca.acta || '',
+            resolucionOponente: marca.resolucion || '',
+            claseOponente: marca.claseNiza,
+            productosOponente: marca.productos || '',
+            marcaOpuesta: c.actaDenominacion,
+            actaOpuesta: c.acta,
+            claseOpuesta: c.actaClase,
+            productosOpuestos: '',
+            titularOponente: marca.titularNombre,
+            similitud: c.similitud,
+            razon: c.explicacion,
+          }),
+        },
+      });
+      oposicionesCreadas++;
+
+      await prisma.alerta.create({
+        data: {
+          userId: marca.userId,
+          tipo: 'OPOSICION_DETECTADA',
+          titulo: `⚠️ Marca confundible detectada: "${c.actaDenominacion}"`,
+          descripcion:
+            `Se publicó en el Boletín del ${fecha.toLocaleDateString('es-AR')} la solicitud ` +
+            `"${c.actaDenominacion}" (Acta ${c.acta}, Clase ${c.actaClase}) de ${c.actaTitular}, ` +
+            `confundible con tu marca "${marca.denominacion}" (Clase ${marca.claseNiza}). ` +
+            `${c.explicacion} ` +
+            `Plazo para oponerse: hasta el ${vencimientoTexto} a las 23:59 ` +
+            `(${diasHastaVencimiento(plazoOposicion)} días corridos).`,
+          // `urgente` no existe en el modelo Alerta. La urgencia ya está en el
+          // tipo, y lo que sí hacía falta es la fecha de vencimiento: el modelo
+          // la indexa y es lo que ordena el panel por plazo más próximo.
+          fechaVencimiento: plazoOposicion,
+          marcaId: marca.id,
+          oposicionId: oposicion.id,
+          fechaAlerta: new Date(),
+        },
+      });
+      alertasCreadas++;
+
+      await notificacionService.enviarAlertaOposicion(
+        marca.userId,
+        marca.denominacion,
+        c.actaDenominacion,
+        c.acta,
+        plazoOposicion
+      );
     }
 
-    logger.info(`✅ Vigilancia completada: ${alertasGeneradas} alertas generadas`);
-    return { alertasGeneradas };
+    // Marcar las entradas como procesadas es lo que impide volver a mirarlas.
+    // En seco no se toca, y con `limite` tampoco: quedaron actas sin revisar.
+    let entradasMarcadasProcesadas = 0;
+    if (!seco && limite === undefined) {
+      const r = await prisma.boletinEntrada.updateMany({
+        where: { fechaBoletin: fecha, procesado: false },
+        data: { procesado: true },
+      });
+      entradasMarcadasProcesadas = r.count;
+    }
+
+    logger.info(
+      `✅ [Vigilancia] ${cruce.coincidencias.length} coincidencias · ` +
+        `${oposicionesCreadas} oposiciones · ${alertasCreadas} alertas · ` +
+        `${yaExistian} ya existían${seco ? ' (SECO: no se escribió nada)' : ''}`
+    );
+
+    return {
+      seco,
+      coincidenciasEncontradas: cruce.coincidencias.length,
+      oposicionesCreadas,
+      alertasCreadas,
+      yaExistian,
+      entradasMarcadasProcesadas,
+      detalle,
+      advertencias: cruce.advertencias,
+    };
   },
 
   /**
