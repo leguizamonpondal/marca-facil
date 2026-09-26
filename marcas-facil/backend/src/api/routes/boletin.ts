@@ -352,6 +352,54 @@ router.get('/vigilancia/cruzar', async (req, res: Response) => {
   }
 });
 
+// ── GET /api/boletin/vigilancia/escribir ─────────────────────────────────────
+//
+// La vigilancia COMPLETA: cruza y además deja cada coincidencia registrada
+// como oposición PENDIENTE con su alerta.
+//
+// A diferencia de `/vigilancia/cruzar`, esta ruta **escribe**. Por eso el
+// modo seco es el predeterminado y hay que pedir explícitamente que escriba.
+//
+//   (sin parámetros)   → SECO: calcula y muestra qué crearía, sin tocar nada
+//   ?escribir=1        → escribe de verdad
+//   ?limite=1          → corta después de N oposiciones creadas
+//   ?fecha=2026-09-23  → otra fecha
+//
+// El límite además impide que se marquen las entradas como procesadas: si se
+// cortó a la tercera coincidencia, quedaron actas sin revisar y darlas por
+// vistas sería perder la vigilancia de esa fecha en silencio.
+router.get('/vigilancia/escribir', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  try {
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : ultimoMiercoles();
+    if (isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-23' });
+    }
+
+    const limiteCrudo = req.query.limite ? Number(req.query.limite) : undefined;
+    if (limiteCrudo !== undefined && (!Number.isInteger(limiteCrudo) || limiteCrudo < 1)) {
+      return res.status(400).json({ error: 'El límite tiene que ser un entero de 1 para arriba.' });
+    }
+
+    const seco = !req.query.escribir;
+    const r = await boletinService.procesarVigilancia(fecha, { seco, limite: limiteCrudo });
+
+    return res.json({
+      fecha: fecha.toLocaleDateString('es-AR'),
+      ...r,
+      aviso: seco
+        ? 'MODO SECO: no se creó ni se modificó nada. `detalle` es lo que se crearía. ' +
+          'Para escribir de verdad, agregá &escribir=1 a la URL.'
+        : 'Se escribió en la base. Las oposiciones quedan en estado PENDIENTE: ' +
+          'ninguna se presentó ante el INPI, eso sigue siendo un acto del matriculado.',
+    });
+  } catch (err: any) {
+    logger.error(`[Vigilancia] Falló al escribir: ${err.message}`);
+    return res.status(502).json({ error: 'No se pudo procesar', detalle: err.message });
+  }
+});
+
 router.use(authenticate);
 
 // ── GET /api/boletin — Listar boletines descargados ──────────────────────────
