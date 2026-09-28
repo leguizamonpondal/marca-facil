@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { prisma } from '../../db/client';
 import { AppError } from '../../middleware/errorHandler';
 import { authenticate, requirePlan, AuthRequest } from '../../middleware/auth';
-import { boletinService } from '../../services/boletinService';
+import { boletinService, recuperarDenominacionesMixtas } from '../../services/boletinService';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -770,6 +770,55 @@ router.get('/mixtas/probar', async (req, res: Response) => {
   } catch (err: any) {
     logger.error(`[Mixtas] Falló la prueba: ${err.message}`);
     return res.status(502).json({ error: 'No se pudo consultar', detalle: err.message });
+  }
+});
+
+// ── GET /api/boletin/mixtas/recuperar ────────────────────────────────────────
+//
+// Recupera y GUARDA la denominación de las actas que no la traen. Es el paso
+// que sube la cobertura de la vigilancia del 47 % al 93 %.
+//
+// Va por tandas porque una semana son ~1.100 titulares distintos y el proxy de
+// Railway corta las respuestas largas. Cada llamada procesa un tope y devuelve
+// `pendientesQueQuedan`: se llama de nuevo hasta que dé 0. Es reanudable: sólo
+// mira las actas que siguen sin denominación, así que nada se pide dos veces.
+//
+//   (sin parámetros)   → SECO: consulta y no guarda nada
+//   ?guardar=1         → guarda de verdad
+//   ?titulares=100     → cuántos titulares por tanda (por defecto 100, máx 300)
+//   ?fecha=2026-09-23  → otra fecha
+router.get('/mixtas/recuperar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  try {
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : ultimoMiercoles();
+    if (isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-23' });
+    }
+    const limiteTitulares = Math.min(Number(req.query.titulares) || 100, 300);
+    const seco = !req.query.guardar;
+
+    const r = await recuperarDenominacionesMixtas(fecha, { limiteTitulares, seco });
+
+    return res.json({
+      ...r,
+      fecha: r.fecha.toLocaleDateString('es-AR'),
+      // Las que el WS devolvió sin denominación no son un fallo: son
+      // figurativas puras, donde la marca ES el dibujo.
+      figurativasSinTexto: r.sinDenominacionEnElWS.length,
+      sinDenominacionEnElWS: r.sinDenominacionEnElWS.slice(0, 20),
+      noEncontradas: r.noEncontradas.slice(0, 20),
+      aviso: seco
+        ? 'MODO SECO: se consultó al INPI pero NO se guardó nada. ' +
+          'Para guardar, agregá &guardar=1 a la URL.'
+        : r.pendientesQueQuedan > 0
+          ? `Guardado. Quedan ~${r.pendientesQueQuedan} titulares: volvé a llamar la ` +
+            'misma URL hasta que pendientesQueQuedan sea 0.'
+          : 'Guardado. No quedan titulares pendientes para esta fecha.',
+    });
+  } catch (err: any) {
+    logger.error(`[Mixtas] Falló la recuperación: ${err.message}`);
+    return res.status(502).json({ error: 'No se pudo recuperar', detalle: err.message });
   }
 });
 
