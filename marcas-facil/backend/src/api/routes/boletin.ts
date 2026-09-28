@@ -17,6 +17,7 @@ import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles, descargarPdf
 import { extraerTextoDelPdf, parsearActas } from '../../services/boletinParser';
 import { cruzarBoletin, cruzarUnaMarca, indexarActas, agruparPorActa } from '../../services/vigilanciaService';
 import { buscarPorTitularWS } from '../../services/inpiWsService';
+import { calcularHuella } from '../../utils/huellaVisual';
 import { descargarBoletinesDeLaFecha, limpiar as limpiarTemporales } from '../../services/boletinDescarga';
 import { logger } from '../../utils/logger';
 
@@ -820,6 +821,141 @@ router.get('/mixtas/recuperar', async (req, res: Response) => {
     logger.error(`[Mixtas] Falló la recuperación: ${err.message}`);
     return res.status(502).json({ error: 'No se pudo recuperar', detalle: err.message });
   }
+});
+
+// ── GET /api/boletin/logo/probar ─────────────────────────────────────────────
+//
+// ¿Se puede traer el logo de una marca desde el INPI, sabiendo sólo el acta?
+//
+// De esa respuesta depende quién hace un trabajo: si se puede, el sistema baja
+// los 290 logos de la cartera solo; si no, hay que buscarlos a mano uno por uno.
+// No lo sabemos, y no conviene suponerlo: esta ruta lo averigua probando las
+// vías posibles y reportando lo que devuelve cada una, sin interpretar.
+//
+// Cuando alguna vía entrega bytes de imagen, además se le calcula la huella
+// visual, porque eso prueba el camino entero —traer, reconocer, medir— y no
+// sólo que el servidor contestó algo.
+//
+//   ?acta=3606253   el acta a probar (por defecto, una mixta de la cartera)
+router.get('/logo/probar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const acta = String(req.query.acta || '3606253').replace(/\D/g, '');
+  if (!acta) return res.status(400).json({ error: 'Falta el número de acta. Ej: ?acta=3606253' });
+
+  const { default: axios } = await import('axios');
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  type Intento = {
+    via: string;
+    url: string;
+    estado: number | string;
+    tipoDeContenido?: string;
+    bytes?: number;
+    /** Qué se encontró adentro, descrito en palabras. */
+    hallazgo: string;
+    /** Sólo si se obtuvo una imagen de verdad. */
+    huella?: { hash: string; proporcion: number };
+    /** Recorte de la respuesta, para poder mirar qué vino. */
+    muestra?: string;
+  };
+
+  const intentos: Intento[] = [];
+
+  /** Busca cualquier rastro de imagen en una respuesta JSON o HTML. */
+  const rastrosDeImagen = (texto: string): string => {
+    const rastros: string[] = [];
+    if (/data:image\/[a-z]+;base64,/i.test(texto)) rastros.push('imagen embebida en base64');
+    const imgs = texto.match(/<img[^>]+src=["']([^"']+)["']/gi) || [];
+    if (imgs.length) rastros.push(`${imgs.length} etiqueta(s) <img>`);
+    const campos = (texto.match(/"[^"]*(imagen|image|logo|foto|adjunto)[^"]*"\s*:/gi) || [])
+      .map((c) => c.replace(/["\s:]/g, ''));
+    if (campos.length) rastros.push(`campos JSON: ${[...new Set(campos)].join(', ')}`);
+    return rastros.length ? rastros.join(' · ') : 'ningún rastro de imagen';
+  };
+
+  const probar = async (via: string, url: string, opciones: any = {}) => {
+    try {
+      const r = await axios.get(url, {
+        timeout: 20_000,
+        headers: { 'User-Agent': UA, 'Accept-Language': 'es-AR,es;q=0.9', ...(opciones.headers || {}) },
+        responseType: opciones.responseType || 'text',
+        validateStatus: () => true,
+        maxRedirects: 5,
+      });
+
+      const tipo = String(r.headers['content-type'] || '');
+      const intento: Intento = {
+        via,
+        url,
+        estado: r.status,
+        tipoDeContenido: tipo,
+        hallazgo: '',
+      };
+
+      if (opciones.responseType === 'arraybuffer') {
+        const buf = Buffer.from(r.data);
+        intento.bytes = buf.length;
+        if (r.status === 200 && /^image\//.test(tipo) && buf.length > 500) {
+          intento.hallazgo = '✅ devolvió una imagen';
+          try {
+            const h = await calcularHuella(buf);
+            intento.huella = { hash: h.hash, proporcion: h.proporcion };
+          } catch (e: any) {
+            intento.hallazgo += ` (pero no se pudo leer: ${e.message})`;
+          }
+        } else {
+          intento.hallazgo = `no es una imagen (${tipo || 'sin tipo'})`;
+        }
+      } else {
+        const texto = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
+        intento.bytes = texto.length;
+        intento.hallazgo = r.status === 200 ? rastrosDeImagen(texto) : `HTTP ${r.status}`;
+        intento.muestra = texto.slice(0, 400);
+      }
+
+      intentos.push(intento);
+    } catch (err: any) {
+      intentos.push({ via, url, estado: 'ERROR', hallazgo: err.message });
+    }
+  };
+
+  // ── Vía 1 · las dos APIs públicas de consulta por acta ────────────────────
+  // Ya se usan para el estado del trámite. La pregunta es si el JSON trae
+  // además la imagen o una URL a ella.
+  await probar('API pública inpi.gob.ar', `https://www.inpi.gob.ar/rest/consulta/marcas/${acta}`);
+  await probar('API portaltramitesline', `https://portaltramitesline.inpi.gob.ar/api/consulta/${acta}`);
+
+  // ── Vía 2 · el detalle del portal ─────────────────────────────────────────
+  // En la grilla de resultados cada fila tiene un botón «+» que despliega el
+  // detalle. Si el logo se muestra ahí, tiene que salir de alguna de estas.
+  const BASE = 'https://portaltramites.inpi.gob.ar';
+  await probar('Portal · Resultado', `${BASE}/MarcasConsultas/Resultado?acta=${acta}`);
+  await probar('Portal · DetalleMarca', `${BASE}/MarcasConsultas/DetalleMarca?acta=${acta}`);
+  await probar('Portal · imagen directa', `${BASE}/MarcasConsultas/Imagen?acta=${acta}`, {
+    responseType: 'arraybuffer',
+  });
+  await probar('Portal · ImagenMarca', `${BASE}/MarcasConsultas/ImagenMarca/${acta}`, {
+    responseType: 'arraybuffer',
+  });
+
+  const conImagen = intentos.filter((i) => i.huella);
+  const conRastro = intentos.filter((i) => /imagen|<img/i.test(i.hallazgo) && !i.huella);
+
+  return res.json({
+    acta,
+    veredicto: conImagen.length
+      ? `✅ SE PUEDE: ${conImagen.length} vía(s) devolvieron la imagen y se le calculó la huella. ` +
+        'Los 290 logos de la cartera se bajan solos.'
+      : conRastro.length
+        ? '🔎 HAY RASTRO pero no la imagen todavía: alguna respuesta menciona imágenes. ' +
+          'Mirá `muestra` de esas vías: probablemente haya una URL que falta seguir.'
+        : '❌ NINGUNA de las vías probadas devolvió el logo. Habría que mirar el portal ' +
+          'a mano con las herramientas de desarrollador, o buscarlos manualmente.',
+    intentos,
+  });
 });
 
 router.use(authenticate);
