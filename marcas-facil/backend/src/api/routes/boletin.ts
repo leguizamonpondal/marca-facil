@@ -16,6 +16,7 @@ import * as crypto from 'crypto';
 import { listarBoletines, boletinesDeMarcasNuevas, ultimoMiercoles, descargarPdf } from '../../services/boletinPortal';
 import { extraerTextoDelPdf, parsearActas } from '../../services/boletinParser';
 import { cruzarBoletin, cruzarUnaMarca, indexarActas, agruparPorActa } from '../../services/vigilanciaService';
+import { buscarPorTitularWS } from '../../services/inpiWsService';
 import { descargarBoletinesDeLaFecha, limpiar as limpiarTemporales } from '../../services/boletinDescarga';
 import { logger } from '../../utils/logger';
 
@@ -590,6 +591,135 @@ function tarjeta(s) {
 }
 </script>
 </body></html>`);
+});
+
+// ── GET /api/boletin/mixtas/probar ───────────────────────────────────────────
+//
+// LA PREGUNTA QUE DECIDE TODO EL BLOQUE DE LAS MIXTAS.
+//
+// El 52 % de las actas del Boletín no traen denominación: son mixtas y
+// figurativas, y el (54) viene vacío porque el nombre está dentro del logo. Las
+// mixtas SÍ tienen denominación y el plan es recuperarla entrando por el
+// titular, que el Boletín publica para el 100 % de las actas:
+//
+//   ConsultaCuitOTitular(titular) → todas las marcas de ese titular, con Acta
+//   y Denominación → se empareja por número de acta.
+//
+// ⚠️ Hay un supuesto sin verificar, y si es falso el camino entero no sirve:
+//    el WS viene filtrado como «solo vigentes» —replica el filtro del portal;
+//    medido con NIKE: 616 sin filtro, 202 con filtro, y el WS devuelve 202—.
+//    **No se sabe si una solicitud recién publicada, todavía en trámite, entra
+//    en ese filtro.** Y es exactamente lo que necesitamos: el Boletín de
+//    marcas nuevas son, por definición, solicitudes en trámite.
+//
+// Esta ruta lo contesta con datos, no con suposiciones: toma actas reales sin
+// denominación de una fecha, consulta el WS por el titular de cada una, y
+// dice si el acta aparece y con qué denominación.
+//
+// Si la tasa de recuperación es alta, se programa este camino. Si es cero, el
+// filtro deja afuera lo que buscamos y hay que ir por el portal, que sí
+// consulta por número de acta.
+//
+//   ?fecha=2026-09-23   otra fecha (por defecto, el último miércoles)
+//   ?limite=10          cuántas actas probar (por defecto 10, máximo 50)
+router.get('/mixtas/probar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const t0 = Date.now();
+  try {
+    const fecha = req.query.fecha ? new Date(String(req.query.fecha)) : ultimoMiercoles();
+    if (isNaN(fecha.getTime())) {
+      return res.status(400).json({ error: 'Fecha inválida. Formato: ?fecha=2026-09-23' });
+    }
+    const limite = Math.min(Number(req.query.limite) || 10, 50);
+
+    // Actas sin denominación de esa fecha: las que hoy no se cotejan.
+    const sinDenominacion = await prisma.boletinEntrada.findMany({
+      where: { fechaBoletin: fecha, denominacion: null },
+      select: { acta: true, claseNiza: true, titularNombre: true, tipoInid: true },
+      take: limite,
+    });
+
+    if (sinDenominacion.length === 0) {
+      return res.status(404).json({
+        error: `No hay actas sin denominación para el ${fecha.toLocaleDateString('es-AR')}.`,
+        pista: 'Puede que la fecha no tenga boletín cargado. Probá con ?fecha=2026-09-23.',
+      });
+    }
+
+    // Una consulta por titular, no por acta: varias actas comparten titular.
+    const porTitular = new Map<string, typeof sinDenominacion>();
+    for (const e of sinDenominacion) {
+      const t = (e.titularNombre || '').trim();
+      if (!t || t === 'No informado') continue;
+      const g = porTitular.get(t) || [];
+      g.push(e);
+      porTitular.set(t, g);
+    }
+
+    const resultados: {
+      acta: string;
+      tipo: string | null;
+      clase: number;
+      titular: string;
+      titularDevolvioMarcas: number;
+      encontrada: boolean;
+      denominacion?: string;
+      estadoEnElWS?: string;
+    }[] = [];
+
+    for (const [titular, actas] of porTitular) {
+      let delTitular: Awaited<ReturnType<typeof buscarPorTitularWS>> = [];
+      let fallo = '';
+      try {
+        delTitular = await buscarPorTitularWS(titular);
+      } catch (e: any) {
+        fallo = e.message;
+      }
+
+      for (const e of actas) {
+        // El acta puede venir con o sin puntos; se compara sólo por dígitos.
+        const soloDigitos = (s: string) => String(s || '').replace(/\D/g, '');
+        const m = delTitular.find((x) => soloDigitos(x.acta) === soloDigitos(e.acta));
+        resultados.push({
+          acta: e.acta,
+          tipo: e.tipoInid,
+          clase: e.claseNiza,
+          titular,
+          titularDevolvioMarcas: delTitular.length,
+          encontrada: Boolean(m),
+          denominacion: m?.denominacion,
+          estadoEnElWS: m?.estado || (fallo ? `ERROR: ${fallo}` : undefined),
+        });
+      }
+    }
+
+    const encontradas = resultados.filter((r) => r.encontrada).length;
+    const tasa = resultados.length ? Math.round((encontradas / resultados.length) * 100) : 0;
+
+    return res.json({
+      fecha: fecha.toLocaleDateString('es-AR'),
+      actasProbadas: resultados.length,
+      titularesConsultados: porTitular.size,
+      denominacionesRecuperadas: encontradas,
+      tasaDeRecuperacion: `${tasa} %`,
+      veredicto:
+        tasa >= 70
+          ? '✅ El filtro de vigentes NO deja afuera las solicitudes en trámite. ' +
+            'El camino por titular sirve: se programa este.'
+          : tasa === 0
+            ? '❌ El WS no devuelve ninguna de estas actas. El filtro de vigentes deja ' +
+              'afuera las solicitudes en trámite y este camino NO sirve. Hay que ir por ' +
+              'el portal, que consulta por número de acta.'
+            : '⚠️ Recuperación parcial. Hay que mirar fila por fila qué distingue a las ' +
+              'que aparecen de las que no antes de decidir.',
+      resultados,
+      milisegundos: Date.now() - t0,
+    });
+  } catch (err: any) {
+    logger.error(`[Mixtas] Falló la prueba: ${err.message}`);
+    return res.status(502).json({ error: 'No se pudo consultar', detalle: err.message });
+  }
 });
 
 router.use(authenticate);
