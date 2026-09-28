@@ -662,6 +662,8 @@ router.get('/mixtas/probar', async (req, res: Response) => {
       tipo: string | null;
       clase: number;
       titular: string;
+      cotitulares: number;
+      consultadoComo?: string;
       titularDevolvioMarcas: number;
       encontrada: boolean;
       denominacion?: string;
@@ -669,33 +671,78 @@ router.get('/mixtas/probar', async (req, res: Response) => {
     }[] = [];
 
     for (const [titular, actas] of porTitular) {
-      let delTitular: Awaited<ReturnType<typeof buscarPorTitularWS>> = [];
-      let fallo = '';
-      try {
-        delTitular = await buscarPorTitularWS(titular);
-      } catch (e: any) {
-        fallo = e.message;
-      }
+      // El Boletín junta los cotitulares en una línea separados por asterisco:
+      //   PERON IGNACIO * PERON TOMAS * PERON JOAQUIN
+      // El padrón del INPI los tiene por separado, y el WS busca "empieza con",
+      // así que esa línea entera no encuentra a nadie y devuelve cero — medido
+      // el 28/09: las 3 únicas actas que fallaron de 10 eran las 3 de
+      // cotitularidad, y las 7 con titular único acertaron todas.
+      //
+      // Se prueba cotitular por cotitular hasta dar con el acta. Un acta en
+      // cotitularidad figura bajo cada uno de sus titulares, así que alcanza
+      // con que uno matchee.
+      const variantes = titular.split('*').map((v) => v.trim()).filter(Boolean);
+      const soloDigitos = (s: string) => String(s || '').replace(/\D/g, '');
 
       for (const e of actas) {
-        // El acta puede venir con o sin puntos; se compara sólo por dígitos.
-        const soloDigitos = (s: string) => String(s || '').replace(/\D/g, '');
-        const m = delTitular.find((x) => soloDigitos(x.acta) === soloDigitos(e.acta));
-        resultados.push({
-          acta: e.acta,
-          tipo: e.tipoInid,
-          clase: e.claseNiza,
-          titular,
-          titularDevolvioMarcas: delTitular.length,
-          encontrada: Boolean(m),
-          denominacion: m?.denominacion,
-          estadoEnElWS: m?.estado || (fallo ? `ERROR: ${fallo}` : undefined),
-        });
+        let encontrada: (typeof resultados)[number] | undefined;
+        let ultimoTotal = 0;
+        let fallo = '';
+        let usada = '';
+
+        for (const v of variantes) {
+          let delTitular: Awaited<ReturnType<typeof buscarPorTitularWS>> = [];
+          try {
+            delTitular = await buscarPorTitularWS(v);
+          } catch (err: any) {
+            fallo = err.message;
+            continue;
+          }
+          ultimoTotal = delTitular.length;
+          usada = v;
+          const m = delTitular.find((x) => soloDigitos(x.acta) === soloDigitos(e.acta));
+          if (m) {
+            encontrada = {
+              acta: e.acta,
+              tipo: e.tipoInid,
+              clase: e.claseNiza,
+              titular,
+              cotitulares: variantes.length,
+              consultadoComo: v,
+              titularDevolvioMarcas: delTitular.length,
+              encontrada: true,
+              denominacion: m.denominacion,
+              estadoEnElWS: m.estado,
+            };
+            break;
+          }
+        }
+
+        resultados.push(
+          encontrada || {
+            acta: e.acta,
+            tipo: e.tipoInid,
+            clase: e.claseNiza,
+            titular,
+            cotitulares: variantes.length,
+            consultadoComo: usada || undefined,
+            titularDevolvioMarcas: ultimoTotal,
+            encontrada: false,
+            estadoEnElWS: fallo ? `ERROR: ${fallo}` : undefined,
+          }
+        );
       }
     }
 
     const encontradas = resultados.filter((r) => r.encontrada).length;
     const tasa = resultados.length ? Math.round((encontradas / resultados.length) * 100) : 0;
+
+    // La comparación que importa: el arreglo del asterisco sólo sirve si sube
+    // la tasa de las actas en cotitularidad, que son las que fallaban.
+    const unico = resultados.filter((r) => r.cotitulares === 1);
+    const varios = resultados.filter((r) => r.cotitulares > 1);
+    const pct = (g: typeof resultados) =>
+      g.length ? `${Math.round((g.filter((r) => r.encontrada).length / g.length) * 100)} %` : '—';
 
     return res.json({
       fecha: fecha.toLocaleDateString('es-AR'),
@@ -703,6 +750,10 @@ router.get('/mixtas/probar', async (req, res: Response) => {
       titularesConsultados: porTitular.size,
       denominacionesRecuperadas: encontradas,
       tasaDeRecuperacion: `${tasa} %`,
+      porTipoDeTitular: {
+        titularUnico: `${pct(unico)} (${unico.filter((r) => r.encontrada).length}/${unico.length})`,
+        enCotitularidad: `${pct(varios)} (${varios.filter((r) => r.encontrada).length}/${varios.length})`,
+      },
       veredicto:
         tasa >= 70
           ? '✅ El filtro de vigentes NO deja afuera las solicitudes en trámite. ' +
