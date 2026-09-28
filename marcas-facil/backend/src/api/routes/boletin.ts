@@ -958,6 +958,159 @@ router.get('/logo/probar', async (req, res: Response) => {
   });
 });
 
+// ── GET /api/boletin/logo/grilla ─────────────────────────────────────────────
+//
+// Segunda pregunta, después de la primera: sabemos que el logo existe como
+// imagen embebida (`data:image/jpg;base64,...`) porque se copió una desde el
+// portal a mano. Lo que no sabemos es **en qué respuesta viaja**, y sin eso no
+// se puede bajar sola.
+//
+// No está en `MarcasConsultas/Resultado`: esa página se revisó y no contiene
+// ningún `data:image`. Queda la otra fuente, la que la grilla del portal usa
+// de verdad: el POST a `GrillaMarcasAvanzada`, que ya se usa en la app para
+// buscar antecedentes. Su respuesta se parsea campo por campo, quedándose sólo
+// con siete —acta, denominación, clase, tipo, titular, resolución, fechas— y
+// descartando en silencio todo lo demás. Si la imagen viene ahí, la venimos
+// tirando a la basura en cada búsqueda desde el primer día.
+//
+// Esta ruta devuelve el ítem **crudo**, sin filtrar, para poder verlo.
+//
+// Busca el acta que se le pide: toma su denominación de nuestra base —ya
+// tenemos las 843 con acta y denominación— y con eso interroga la grilla, que
+// no acepta buscar por número de acta.
+//
+//   ?acta=3606253
+router.get('/logo/grilla', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const acta = String(req.query.acta || '').replace(/\D/g, '');
+  if (!acta) return res.status(400).json({ error: 'Falta el acta. Ej: ?acta=3606253' });
+
+  const marca = await prisma.marca.findFirst({
+    where: { acta },
+    select: { denominacion: true, claseNiza: true, tipoMarca: true },
+  });
+  if (!marca) {
+    return res.status(404).json({
+      error: `El acta ${acta} no está en la cartera, y la grilla del INPI no busca por acta. ` +
+             'Probá con un acta de la cartera.',
+    });
+  }
+
+  const { default: axios } = await import('axios');
+  const BASE = 'https://portaltramites.inpi.gob.ar';
+  const BUSQUEDA_URL = `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`;
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  // Cookie de sesión ASP.NET: sin ella la grilla contesta vacío.
+  let cookies = '';
+  try {
+    const { headers } = await axios.get(BUSQUEDA_URL, {
+      timeout: 15_000,
+      headers: { 'User-Agent': UA, Accept: 'text/html' },
+    });
+    const sc = headers['set-cookie'] || [];
+    cookies = (Array.isArray(sc) ? sc : [String(sc)]).map((c) => c.split(';')[0]).join('; ');
+  } catch (err: any) {
+    return res.status(502).json({ error: `No se pudo abrir sesión en el portal: ${err.message}` });
+  }
+
+  let data: any;
+  try {
+    const r = await axios.post(
+      `${BASE}/MarcasConsultas/GrillaMarcasAvanzada`,
+      {
+        Tipo_Resolucion: '',
+        Clase: String(marca.claseNiza),
+        TipoBusquedaDenominacion: '0',      // 0 = Empieza con: más preciso para una denominación exacta
+        Denominacion: marca.denominacion,
+        Titular: '',
+        TipoBusquedaTitular: '1',
+        Fecha_IngresoDesde: '', Fecha_IngresoHasta: '',
+        Fecha_ResolucionDesde: '', Fecha_ResolucionHasta: '',
+        vigentes: true,
+        limit: 50,
+        offset: 0,
+      },
+      {
+        timeout: 25_000,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/javascript, */*; q=0.01',
+          'X-Requested-With': 'XMLHttpRequest',
+          'User-Agent': UA,
+          Referer: BUSQUEDA_URL,
+          Origin: BASE,
+          ...(cookies ? { Cookie: cookies } : {}),
+        },
+        maxRedirects: 0,
+      },
+    );
+    data = r.data;
+  } catch (err: any) {
+    return res.status(502).json({ error: `La grilla falló: ${err.message}` });
+  }
+
+  const lista: any[] = Array.isArray(data)
+    ? data
+    : (data?.data ?? data?.marcas ?? data?.rows ?? data?.resultado ?? []);
+
+  const completo = JSON.stringify(data);
+  const item =
+    lista.find((i) => String(i.Acta ?? i.acta ?? '').replace(/\D/g, '') === acta) ?? lista[0] ?? null;
+
+  // ¿Alguno de los campos del ítem es una imagen embebida? Se busca por
+  // contenido, no por nombre de campo: el nombre puede ser cualquiera.
+  const campoImagen = item
+    ? Object.entries(item).find(
+        ([, v]) => typeof v === 'string' && /^\s*(data:image\/|\/9j\/|iVBORw0KGgo)/.test(v),
+      )
+    : undefined;
+
+  let huella: any = null;
+  if (campoImagen) {
+    try {
+      const crudo = String(campoImagen[1]).replace(/^\s*data:image\/[a-z+]+;base64,/i, '').trim();
+      huella = await calcularHuella(Buffer.from(crudo, 'base64'));
+    } catch (e: any) {
+      huella = { error: e.message };
+    }
+  }
+
+  // El ítem crudo, recortando los campos larguísimos para poder leerlo: de una
+  // imagen basta ver que está y cuánto pesa.
+  const itemLegible = item
+    ? Object.fromEntries(
+        Object.entries(item).map(([k, v]) =>
+          typeof v === 'string' && v.length > 120
+            ? [k, `«${v.length} caracteres» ${v.slice(0, 60)}…`]
+            : [k, v],
+        ),
+      )
+    : null;
+
+  return res.json({
+    acta,
+    buscadoComo: { denominacion: marca.denominacion, clase: marca.claseNiza, tipo: marca.tipoMarca },
+    veredicto: campoImagen
+      ? `✅ LA IMAGEN VIENE EN LA GRILLA, en el campo «${campoImagen[0]}». ` +
+        'Los logos de la cartera se bajan solos, sin buscar nada a mano.'
+      : /data:image\/|base64/i.test(completo)
+        ? '🔎 Hay algo con pinta de imagen en la respuesta pero no en un campo del ítem. ' +
+          'Mirá `clavesDelItem` y `respuestaTruncada`.'
+        : '❌ La grilla no trae la imagen. Hay que buscar la petición del botón «+».',
+    encontrado: Boolean(item),
+    resultadosDeLaGrilla: lista.length,
+    clavesDelItem: item ? Object.keys(item) : [],
+    campoImagen: campoImagen ? { nombre: campoImagen[0], caracteres: String(campoImagen[1]).length } : null,
+    huella,
+    itemLegible,
+    respuestaTruncada: lista.length ? undefined : completo.slice(0, 800),
+  });
+});
+
 router.use(authenticate);
 
 // ── GET /api/boletin — Listar boletines descargados ──────────────────────────
