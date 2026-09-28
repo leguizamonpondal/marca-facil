@@ -18,6 +18,7 @@ import { notificacionService } from './notificacionService';
 // le MUESTRA al cliente; antes esta función tenía su propio cotejo, más
 // simple, y los dos resultados no coincidían.
 import { cruzarBoletin, agruparPorActa, type SolicitudDetectada } from './vigilanciaService';
+import { buscarPorTitularWS } from './inpiWsService';
 
 export const boletinService = {
 
@@ -454,4 +455,208 @@ function extraerCuit(texto: string): string | undefined {
 function extraerProductos(texto: string): string | undefined {
   const match = texto.match(/PRODUCTOS?[:\s]+(.+?)(?:TITULAR|CLASE|$)/i);
   return match ? match[1].trim().substring(0, 500) : undefined;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RECUPERAR LA DENOMINACIÓN DE LAS MIXTAS
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// El 52 % de las actas del Boletín no traen denominación: el campo (54) viene
+// vacío porque el nombre está dentro del logo. Las mixtas SÍ tienen nombre, y
+// se recupera entrando por el titular, que el Boletín publica para el 100 % de
+// las actas.
+//
+// Medido sobre 30 actas reales del boletín del 23/09: **97 % de recuperación**
+// (titular único 96 %, cotitularidad 100 %).
+
+/**
+ * Las variantes con las que se busca un titular, de la más precisa a la más
+ * amplia. Se corta en la primera que encuentra el acta.
+ *
+ * Por qué hacen falta variantes, con los tres casos medidos:
+ *
+ * · **Cotitularidad.** El Boletín junta los cotitulares en una línea separados
+ *   por asterisco —`PERON IGNACIO * PERON TOMAS * PERON JOAQUIN`— y el padrón
+ *   los tiene por separado. Como el WS busca «empieza con», esa línea entera no
+ *   encuentra a nadie: devolvía cero en las 3 de 3 que probamos. Cortando en el
+ *   asterisco pasaron a 5 de 5.
+ *
+ * · **Puntuación que no coincide.** `DAVIES CORALIA ANA` devolvió cero. Otros
+ *   titulares con coma sí funcionaron (`LEDESMA, CLAUDIA NORA`), así que el
+ *   problema no es la coma en sí sino que el Boletín y el padrón la pongan en
+ *   lugares distintos. Acortando el nombre se esquiva.
+ *
+ * · **Lo que NO hace falta arreglar**, y conviene dejarlo escrito para no
+ *   «mejorarlo» después: los paréntesis con texto largo, el `S.A.` con puntos y
+ *   el apóstrofo tipográfico funcionan tal cual. `ITC FIDUCIARIA S.A. (COMO
+ *   FIDUCIARIO DEL FIDEICOMISO DE GARANTÍA DE MARCAS MOLINO CAÑUELAS)` acertó.
+ *
+ * Buscar de más es inofensivo: el emparejamiento final es **por número de
+ * acta**, que es único en el INPI. Si la consulta trae marcas de otro titular
+ * homónimo, simplemente ninguna tiene ese número.
+ */
+export function variantesDeTitular(titular: string): string[] {
+  const partes = titular.split('*').map((p) => p.trim().replace(/\s+/g, ' ')).filter(Boolean);
+
+  // ⚠️ EL ORDEN IMPORTA, y no es el obvio.
+  //
+  // Se agotan PRIMERO los nombres completos de todos los cotitulares, y recién
+  // después los acortados. La versión anterior mezclaba
+  // —`PERON IGNACIO`, `PERON`, `PERON TOMAS`…— y eso consultaba «PERON» a
+  // secas antes que `PERON TOMAS`, que es más preciso.
+  //
+  // No es sólo elegancia: una variante de una palabra trae a todos los
+  // homónimos del padrón, tarda más, y si el WS tiene un tope de resultados
+  // —`GOBIERNO DE LA CIUDAD DE BUENOS AIRES` devolvió 99 clavados, número
+  // demasiado redondo para ser casual— el acta que buscamos puede quedar fuera
+  // del lote justamente en la consulta más amplia.
+  //
+  // Como el llamador corta en cuanto encuentra el acta, los niveles 2 y 3 casi
+  // nunca se ejecutan.
+  const niveles: string[][] = [
+    partes,                                                    // nombre completo
+    partes.map((p) => p.split(' ').slice(0, 2).join(' ')),     // dos palabras
+    partes.map((p) => p.split(' ')[0].replace(/[,;.]+$/, '')), // una palabra
+  ];
+
+  const v: string[] = [];
+  for (const nivel of niveles) {
+    for (const t of nivel) {
+      if (t.length >= 3 && !v.includes(t)) v.push(t);
+    }
+  }
+  return v;
+}
+
+export interface ResultadoRecuperacion {
+  fecha: Date;
+  /** Actas sin denominación que había al empezar. */
+  pendientesAlEmpezar: number;
+  titularesConsultados: number;
+  recuperadas: number;
+  /** Actas que el WS no devolvió con ninguna variante del titular. */
+  noEncontradas: { acta: string; titular: string }[];
+  /** Actas que el WS devolvió, pero sin denominación: son figurativas puras. */
+  sinDenominacionEnElWS: string[];
+  /** Cuántas quedan para la próxima tanda. */
+  pendientesQueQuedan: number;
+  milisegundos: number;
+}
+
+/**
+ * Recupera y guarda la denominación de las actas que no la traen, por tandas.
+ *
+ * ── Por qué por tandas y no de una ───────────────────────────────────────────
+ *
+ * Una semana completa son ~1.935 actas sin denominación y ~1.100 titulares
+ * distintos. A 2–4 s por consulta al INPI eso es más de media hora, y el proxy
+ * de Railway corta la respuesta mucho antes. Así que cada llamada procesa un
+ * tope de titulares y devuelve cuántos quedan: se llama de nuevo hasta que
+ * `pendientesQueQuedan` sea 0.
+ *
+ * Es **reanudable por construcción**: la consulta de pendientes filtra por
+ * `denominacion: null`, así que lo ya recuperado nunca se vuelve a pedir. Una
+ * tanda que se corta a la mitad no pierde nada ni duplica trabajo.
+ *
+ * `seco: true` consulta y NO guarda, para poder medir sin tocar la base.
+ */
+export async function recuperarDenominacionesMixtas(
+  fechaBoletin: Date,
+  opciones: { limiteTitulares?: number; seco?: boolean } = {}
+): Promise<ResultadoRecuperacion> {
+  const { limiteTitulares = 100, seco = false } = opciones;
+  const t0 = Date.now();
+
+  const pendientes = await prisma.boletinEntrada.findMany({
+    where: { fechaBoletin, denominacion: null },
+    select: { id: true, acta: true, titularNombre: true },
+  });
+
+  // Una consulta por titular, no por acta: en el 11121 eran 440 actas para 258
+  // titulares, o sea 1,7 actas por consulta ahorrada.
+  const porTitular = new Map<string, typeof pendientes>();
+  for (const e of pendientes) {
+    const t = (e.titularNombre || '').trim();
+    if (!t || t === 'No informado') continue;
+    const g = porTitular.get(t) || [];
+    g.push(e);
+    porTitular.set(t, g);
+  }
+
+  const tanda = [...porTitular.entries()].slice(0, limiteTitulares);
+  const soloDigitos = (s: string) => String(s || '').replace(/\D/g, '');
+
+  let recuperadas = 0;
+  const noEncontradas: { acta: string; titular: string }[] = [];
+  const sinDenominacionEnElWS: string[] = [];
+
+  for (const [titular, actas] of tanda) {
+    // Las variantes se consultan una vez por titular y se reutilizan para
+    // todas sus actas.
+    const encontradasAqui = new Map<string, string>();
+    const faltan = new Set(actas.map((a) => soloDigitos(a.acta)));
+
+    for (const v of variantesDeTitular(titular)) {
+      if (faltan.size === 0) break;
+      let marcas: Awaited<ReturnType<typeof buscarPorTitularWS>> = [];
+      try {
+        marcas = await buscarPorTitularWS(v);
+      } catch (err: any) {
+        logger.warn(`[Mixtas] "${v}" falló: ${err.message}`);
+        continue;
+      }
+      for (const m of marcas) {
+        const d = soloDigitos(m.acta);
+        if (faltan.has(d)) {
+          encontradasAqui.set(d, m.denominacion || '');
+          faltan.delete(d);
+        }
+      }
+    }
+
+    for (const a of actas) {
+      const den = encontradasAqui.get(soloDigitos(a.acta));
+      if (den === undefined) {
+        noEncontradas.push({ acta: a.acta, titular });
+        continue;
+      }
+      if (!den) {
+        // El WS la devolvió con denominación vacía: es figurativa pura, la
+        // marca ES el dibujo. No hay texto que recuperar y no es un fallo —
+        // se coteja por Viena y por huella visual.
+        sinDenominacionEnElWS.push(a.acta);
+        continue;
+      }
+      if (!seco) {
+        await prisma.boletinEntrada.update({
+          where: { id: a.id },
+          data: { denominacion: den },
+        });
+      }
+      recuperadas++;
+    }
+  }
+
+  const quedan = seco
+    ? porTitular.size - tanda.length
+    : (await prisma.boletinEntrada.count({ where: { fechaBoletin, denominacion: null } })) > 0
+      ? porTitular.size - tanda.length
+      : 0;
+
+  logger.info(
+    `[Mixtas] ${fechaBoletin.toLocaleDateString('es-AR')}: ${tanda.length} titulares, ` +
+      `${recuperadas} denominaciones${seco ? ' (SECO)' : ''}, ` +
+      `${noEncontradas.length} sin encontrar, ${Date.now() - t0} ms`
+  );
+
+  return {
+    fecha: fechaBoletin,
+    pendientesAlEmpezar: pendientes.length,
+    titularesConsultados: tanda.length,
+    recuperadas,
+    noEncontradas,
+    sinDenominacionEnElWS,
+    pendientesQueQuedan: Math.max(0, quedan),
+    milisegundos: Date.now() - t0,
+  };
 }
