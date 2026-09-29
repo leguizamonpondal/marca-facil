@@ -1658,19 +1658,50 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
   const limite = Math.min(Math.max(parseInt(String(req.query.limite || '10')) || 10, 1), 100);
   const guardar = String(req.query.guardar || '') === '1';
 
+  // ⚠️ «acta IS NOT NULL» no alcanza. Damlong exporta `0` para las marcas que
+  //    no tienen número de acta cargado, y `0` no es nulo: pasa el filtro, se
+  //    le pide la ficha al INPI, el portal contesta 200 con una página vacía y
+  //    la marca queda registrada como consultada con éxito y sin datos.
+  //
+  //    O sea: el error no aparece en `fallidas`. Se ve sólo si alguien mira
+  //    que todo volvió en blanco. Por eso el acta se valida por forma —sólo
+  //    dígitos, seis o más— y no por «no es nulo».
+  const VALIDA = `acta ~ '^[0-9]{6,}$'`;
+
+  // El genérico de `$queryRawUnsafe` no compila contra el cliente generado, así
+  // que el tipo se declara con `as`. `VALIDA` es una constante de este archivo,
+  // no entra nada del usuario; el límite va parametrizado.
+  const filas = (await prisma.$queryRawUnsafe(
+    `SELECT id FROM marcas
+      WHERE "fichaActualizadaEn" IS NULL AND ${VALIDA}
+      ORDER BY acta ASC LIMIT $1`,
+    limite,
+  )) as { id: string }[];
+
   const pendientes = await prisma.marca.findMany({
-    where: { fichaActualizadaEn: null, acta: { not: null } },
+    where: { id: { in: filas.map((f) => f.id) } },
     select: {
       id: true, acta: true, denominacion: true, claseNiza: true,
       tipoMarca: true, titularNombre: true, titularCuit: true, productos: true,
     },
     orderBy: { acta: 'asc' },
-    take: limite,
   });
 
-  const quedanAntes = await prisma.marca.count({
-    where: { fichaActualizadaEn: null, acta: { not: null } },
-  });
+  const [conteo] = (await prisma.$queryRawUnsafe(
+    `SELECT
+       COUNT(*) FILTER (WHERE "fichaActualizadaEn" IS NULL AND ${VALIDA})::int AS pendientes,
+       COUNT(*) FILTER (WHERE NOT (${VALIDA}) OR acta IS NULL)::int AS sinacta
+     FROM marcas`,
+  )) as { pendientes: number; sinacta: number }[];
+  const quedanAntes = conteo?.pendientes ?? 0;
+
+  // Las marcas sin acta utilizable: no se pueden pedir al INPI ni identificar
+  // en el Boletín. No es un problema de esta ruta, pero es acá donde se ve.
+  const sinActa = (await prisma.$queryRawUnsafe(
+    `SELECT acta, denominacion, "claseNiza", "titularNombre" FROM marcas
+      WHERE NOT (${VALIDA}) OR acta IS NULL
+      ORDER BY denominacion LIMIT 20`,
+  )) as { acta: string | null; denominacion: string; claseNiza: number; titularNombre: string }[];
 
   const procesadas: any[] = [];
   const fallidas: any[] = [];
@@ -1805,6 +1836,14 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
     quedabanAntes: quedanAntes,
     procesadasAhora: procesadas.length,
     quedanDespues: guardar ? quedanAntes - procesadas.length : quedanAntes,
+    sinActaUtilizable: {
+      nota:
+        'Marcas cuyo número de acta no es un acta: Damlong exporta «0» cuando no lo tiene ' +
+        'cargado. No se les puede pedir la ficha al INPI ni identificarlas en el Boletín, ' +
+        'así que quedan fuera de la vigilancia por acta. Se listan para poder completarlas.',
+      cantidad: conteo?.sinacta ?? 0,
+      muestra: sinActa,
+    },
     resumen: {
       conLogoYHuella: conLogo,
       conCuitDeTitular: conCuit,
