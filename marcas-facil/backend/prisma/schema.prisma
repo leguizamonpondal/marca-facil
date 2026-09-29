@@ -71,6 +71,124 @@ model PushToken {
 }
 
 // ============================================================
+// TITULARES
+// ============================================================
+
+// Una marca puede tener varios titulares, cada uno con su porcentaje. El
+// modelo anterior guardaba uno solo —`titularNombre` y `titularCuit` en la
+// propia marca— y eso perdía a los cotitulares en silencio.
+//
+// No es un detalle de prolijidad: la legitimación para oponerse es del
+// titular. Una marca al 50/50 donde el sistema conoce a uno solo genera un
+// escrito que omite a un legitimado.
+//
+// `Marca.titularNombre` y `Marca.titularCuit` se conservan y siguen siendo el
+// titular principal —el de mayor porcentaje— porque la app los usa en
+// listados y búsquedas donde traer la relación entera sería gratuito ruido.
+// La verdad completa está acá.
+model TitularMarca {
+  id              String   @id @default(uuid())
+  marcaId         String
+
+  nombre          String
+  // Del INPI viene como "100.00", "50.00". Se guarda tal cual: es un dato de
+  // la ficha, no una cuenta nuestra.
+  porcentaje      String?
+
+  cuit            String?
+  tipoDocumento   String?   // "1-Documento Nacional de Identidad"
+  documento       String?
+  genero          String?
+  pais            String?
+
+  domicilioReal   String?
+  localidad       String?
+  codigoPostal    String?
+
+  // De dónde salió: "INPI" (ficha del portal) o "MANUAL".
+  origen          String   @default("INPI")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  marca           Marca    @relation(fields: [marcaId], references: [id], onDelete: Cascade)
+
+  @@index([marcaId])
+  @@index([cuit])
+  @@map("titulares_marca")
+}
+
+// ============================================================
+// CLASIFICACIÓN DE VIENA
+// ============================================================
+
+// El INPI no aplica la Clasificación de Viena de oficio: el (531) no aparece
+// en el Boletín, el Web Service no devuelve nada figurativo y el arancel sólo
+// ofrece búsqueda fonética y por titular. La aplicamos nosotros.
+//
+// Eso obliga a tres cosas que no son opcionales, porque un código propio que
+// no se puede auditar no sirve para fundar una oposición:
+//
+//   1. VERSIONAR. Cada código guarda con qué clasificador y en qué fecha se
+//      asignó. Cambiar el clasificador no puede reescribir en silencio lo que
+//      ya se vigiló: una oposición se funda en lo que el sistema vio ESE DÍA.
+//   2. LA CORRECCIÓN MANUAL GANA SIEMPRE. `MANUAL` sobrevive a toda
+//      reclasificación posterior, sin excepción.
+//   3. GUARDAR LA IMAGEN clasificada — vive en `Marca` y `BoletinEntrada`.
+//
+// Se usa en los dos extremos del cotejo figurativo —el dibujo del cliente al
+// solicitar, y el del tercero al leer el Boletín— y tiene que ser la MISMA
+// función. Si cada lado se clasifica con un criterio distinto, la vigilancia
+// figurativa no encuentra nada y el defecto es invisible: no produce un error,
+// produce silencio.
+model CodigoViena {
+  id              String   @id @default(uuid())
+
+  // Uno de los dos, nunca los dos: el dibujo es de una marca de la cartera o
+  // de una solicitud publicada en el Boletín.
+  marcaId          String?
+  boletinEntradaId String?
+
+  // "07.01.24" — categoría.división.sección
+  codigo          String
+  // Desglosado, porque la coincidencia es graduada y se consulta por nivel:
+  // los tres iguales = el mismo elemento; categoría y división = mismo grupo;
+  // sólo categoría = familia lejana. Mismo diseño que la afinidad de clases.
+  categoria       Int
+  division        Int
+  seccion         Int
+
+  // Qué se vio, en palabras. Sirve para revisar una clasificación sin abrir la
+  // imagen y para comparar contra el elemento figurativo heredado de Damlong.
+  descripcion     String?
+
+  origen          OrigenClasificacion @default(AUTOMATICO)
+  // Qué clasificador lo asignó. Cambiar de clasificador no reescribe lo viejo:
+  // se agregan códigos nuevos y los anteriores quedan con su versión.
+  clasificadorVersion String
+  // Edición de la Clasificación de Viena. La 10.ª rige desde el 1/1/2026, y un
+  // código de la 9.ª no significa lo mismo: las ediciones cambian secciones.
+  edicion         String   @default("VCL10")
+  // 0 a 1. NULL cuando lo puso una persona: ahí no hay confianza que estimar.
+  confianza       Float?
+
+  asignadoEn      DateTime @default(now())
+
+  marca           Marca?          @relation(fields: [marcaId], references: [id], onDelete: Cascade)
+  boletinEntrada  BoletinEntrada? @relation(fields: [boletinEntradaId], references: [id], onDelete: Cascade)
+
+  @@index([marcaId])
+  @@index([boletinEntradaId])
+  @@index([codigo])
+  @@index([categoria, division, seccion])
+  @@map("codigos_viena")
+}
+
+enum OrigenClasificacion {
+  AUTOMATICO
+  MANUAL
+}
+
+// ============================================================
 // MARCAS
 // ============================================================
 
@@ -140,6 +258,44 @@ model Marca {
   // Logo / imagen (para figurativas y mixtas)
   logoUrl         String?
 
+  // ── El dibujo, tal como se clasificó ──────────────────────────────────────
+  //
+  // Se guarda la IMAGEN, no sólo el código. Sin la imagen no se puede revisar
+  // una clasificación discutida ni reclasificar con un clasificador nuevo, y
+  // una clasificación que no se puede auditar no sirve para fundar nada.
+  //
+  // Se trae del INPI con un POST a MarcasConsultas/Resultado llevando el acta
+  // en el cuerpo: viene embebida en base64 dentro de la ficha. Por número de
+  // acta no hay ambigüedad posible, a diferencia de extraerla del PDF del
+  // Boletín y emparejarla por posición, donde un corrimiento de una sola
+  // página le asigna el logo de un tercero a un acta ajena.
+  logoBase64      String?     // la imagen tal cual vino, sin el prefijo data:
+  logoFormato     String?     // jpg, png…
+  huellaVisual    String?     // dHash de 64 bits en hexadecimal
+  huellaProporcion Float?     // ancho/alto, para descartar comparaciones absurdas
+
+  // ⚠️ Heredado del export de Damlong, que exige cargar las mixtas y
+  //    figurativas con el dibujo descrito entre paréntesis: «NAHANA (CASA)».
+  //
+  //    NO es la clasificación y no reemplaza a Viena: sólo 38 de las 290
+  //    marcas con dibujo lo traen, y ninguna marca nueva lo va a traer, porque
+  //    es una convención de otro programa. Sirve como semilla para el mapeo
+  //    inicial y, sobre todo, como control cruzado: si el clasificador dice
+  //    «flor» donde el agente escribió «casa», hay algo para mirar.
+  elementoFigurativo String?
+
+  // ── Datos de la ficha del INPI ────────────────────────────────────────────
+  resolucionTipo      String?   // Concedida, Denegada…
+  resolucionMotivo    String?   // Estudio Simplificado, Sin oposición…
+  disposicionNumero   String?   // DI-2026-26-APN-DNM#INPI
+  disposicionFecha    DateTime?
+  boletinNotificacion String?   // número de boletín donde se notificó
+  ubicacionExpediente String?
+
+  // Cuándo se trajo la ficha por última vez. NULL = nunca: el dato que falte
+  // en esta marca falta porque no se consultó, no porque el INPI no lo tenga.
+  fichaActualizadaEn  DateTime?
+
   // Agente que presentó
   agenteCuit      String?
 
@@ -178,6 +334,8 @@ model Marca {
   alertas         Alerta[]
   documentos      Documento[]
   estudiosFactibilidad EstudioFactibilidad[]
+  titulares       TitularMarca[]
+  codigosViena    CodigoViena[]
 
   @@index([userId])
   @@index([claseNiza])
@@ -228,11 +386,28 @@ model BoletinEntrada {
   // El (57) del boletín a veces viene truncado y remite a una consulta aparte.
   productosTruncados Boolean @default(false)
 
+  // ── El dibujo de la solicitud publicada ───────────────────────────────────
+  //
+  // Mismos campos que en `Marca`, y a propósito: el cotejo figurativo compara
+  // el dibujo del cliente contra el del tercero, y si los dos lados no se
+  // miden igual la comparación no significa nada.
+  //
+  // Se trae por número de acta desde la ficha del INPI, no extrayendo imágenes
+  // del PDF: ahí las imágenes se ubican por página y posición, y un solo
+  // corrimiento le asigna el logo de un tercero a un acta ajena. Eso no falla
+  // con un error, funda una oposición contra quien no corresponde.
+  logoBase64      String?
+  logoFormato     String?
+  huellaVisual    String?
+  huellaProporcion Float?
+  fichaActualizadaEn DateTime?
+
   // Control de procesamiento
   procesado       Boolean  @default(false) // Si ya se cruzó con marcas del sistema
   createdAt       DateTime @default(now())
 
   oposicionesGeneradas Oposicion[] @relation("BoletinOrigen")
+  codigosViena    CodigoViena[]
 
   @@index([fechaBoletin])
   @@index([claseNiza])
