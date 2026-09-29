@@ -1330,11 +1330,9 @@ router.get('/logo/grilla', async (req, res: Response) => {
   });
 });
 
-// ── GET /api/boletin/detalle/probar ──────────────────────────────────────────
+// ── La ficha del INPI ────────────────────────────────────────────────────────
 //
-// La ficha completa de una marca, desde el INPI, sabiendo sólo el acta.
-//
-// Cómo se llega, que es lo que costó averiguar: NO es un GET con el acta en la
+// Cómo se pide, que es lo que costó averiguar: NO es un GET con el acta en la
 // dirección —eso devuelve la página armada pero vacía, 31 KB de cáscara— sino
 // un POST con el acta en el cuerpo, como formulario:
 //
@@ -1342,21 +1340,230 @@ router.get('/logo/grilla', async (req, res: Response) => {
 //     Content-Type: application/x-www-form-urlencoded
 //     acta=4565664
 //
-// Un solo campo. Esa página trae, en una sola consulta, tres cosas que se
-// venían persiguiendo por separado:
+// Un solo campo. Y esa página trae, en una sola consulta, todo lo que veníamos
+// persiguiendo por separado: el logo embebido en base64, el CUIT del titular,
+// el (57) de productos, el número de resolución y la fecha de vencimiento.
+
+/** Entidades HTML, incluidas las numéricas. */
+function decodificarEntidades(s: string): string {
+  const nombradas: Record<string, string> = {
+    nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>',
+    aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú',
+    Aacute: 'Á', Eacute: 'É', Iacute: 'Í', Oacute: 'Ó', Uacute: 'Ú',
+    ntilde: 'ñ', Ntilde: 'Ñ', uuml: 'ü', Uuml: 'Ü', copy: '©', deg: '°',
+  };
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&([a-zA-Z]+);/g, (todo, n) => (n in nombradas ? nombradas[n] : todo));
+}
+
+/** Sin tildes y en mayúsculas, para reconocer etiquetas sin depender del acento. */
+const sinTildes = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+
+// Todas las etiquetas de la ficha, para saber dónde TERMINA cada campo. Un
+// campo llega hasta que empieza el siguiente: sin la lista completa, un campo
+// vacío se come el contenido del que le sigue. Así fue como en la primera
+// prueba la limitación —que estaba vacía— se tragó entera la titularidad.
+const ETIQUETAS_FICHA = [
+  'PRESENTACION:', 'DENOMINACION:', 'TIPO DE MARCA:', 'DOMICILO LEGAL:',
+  'DOMICILIO LEGAL:', 'RENOVACION DE:', 'RENOVADA POR:', 'NRO DE EFECTOR:',
+  'TITULARIDAD', 'CLASE:', 'PROTECCION:', 'LIMITACION:',
+  'NOMBRE:', 'TIPO DNI:', 'DNI:', 'GENERO:', 'PAIS:', 'CUIT:',
+  'TERRITORIO LEGAL:', 'DOMICILIO REAL:', 'LOCALIDAD:', 'CP.',
+  'GESTION DEL TRAMITE', 'AGENTE:', 'CARACTER:', 'REGLAMENTO DE USO',
+  'PRIORIDADES', 'PUBLICACION', 'OPOSICIONES', 'OPONENTE',
+  'VISTAS Y NOTIFICACIONES', 'CONTESTACION',
+  'RESOLUCION:', 'FEC DE PROY:', 'NRO:', 'TIPO:', 'MOTIVO:',
+  'NOTIFICACION:', 'BOLETIN:', 'OBSERVACION:', 'DISPOSICION:', 'VENCE:',
+  'UBICACION DEL EXPEDIENTE', 'UBICACION ACTUAL:', 'DICTAMENES',
+].map(sinTildes);
+
+// Una etiqueta puede ser el final de otra: `DNI:` está dentro de `TIPO DNI:`.
+// Buscada a secas, `DNI:` cae sobre la de `TIPO DNI:` y el documento vuelve
+// como «1-Documento Nacional de Identidad DNI: 92758680». Por eso se descartan
+// las ocurrencias que en realidad son el final de una etiqueta más larga.
+function indiceEtiqueta(TRAMO: string, et: string, etiquetas: string[], desde = 0): number {
+  const masLargas = etiquetas.filter((o) => o !== et && o.endsWith(et));
+  let cursor = desde;
+  for (;;) {
+    const i = TRAMO.indexOf(et, cursor);
+    if (i < 0) return -1;
+    const finDeEt = i + et.length;
+    const esFinalDeOtra = masLargas.some((larga) => {
+      const arranque = finDeEt - larga.length;
+      return arranque >= 0 && TRAMO.slice(arranque, finDeEt) === larga;
+    });
+    if (!esFinalDeOtra) return i;
+    cursor = i + 1;
+  }
+}
+
+/** Lo que sigue a una etiqueta dentro de un tramo, hasta que empieza otra. */
+function campoDe(tramo: string, etiqueta: string, etiquetas = ETIQUETAS_FICHA): string {
+  const TRAMO = sinTildes(tramo);
+  const et = sinTildes(etiqueta);
+  const i = indiceEtiqueta(TRAMO, et, etiquetas);
+  if (i < 0) return '';
+  const desde = i + et.length;
+  let fin = TRAMO.length;
+  for (const otra of etiquetas) {
+    if (otra === et) continue;
+    const j = indiceEtiqueta(TRAMO, otra, etiquetas, desde);
+    if (j >= 0 && j < fin) fin = j;
+  }
+  return tramo.slice(desde, fin).replace(/^[\s:·`-]+|[\s:·`-]+$/g, '').trim().slice(0, 800);
+}
+
+export interface TitularINPI {
+  nombre: string; porcentaje: string; tipoDocumento: string; documento: string;
+  genero: string; pais: string; cuit: string; domicilioReal: string;
+  localidad: string; codigoPostal: string;
+}
+
+export interface FichaINPI {
+  presentacion: string; denominacion: string; tipoMarca: string;
+  domicilioLegal: string; renovacionDe: string; renovadaPor: string;
+  clase: string; proteccion: string; limitacion: string;
+  titulares: TitularINPI[];
+  agente: { numero: string; nombre: string; caracter: string };
+  resolucion: {
+    estado: string; fechaProyecto: string; numero: string; tipo: string;
+    motivo: string; notificacion: string; boletin: string; observacion: string;
+    disposicion: string; vence: string;
+  };
+  ubicacionActual: string;
+  /** El logo, si la marca tiene. */
+  logo: { formato: string; base64: string } | null;
+}
+
+export function parsearFichaINPI(html: string): FichaINPI {
+  // El logo viaja embebido. Si hay varias imágenes, la del signo es la de más
+  // peso: las otras son iconos del sitio. Se decide midiendo, no por posición.
+  const embebidas = [...html.matchAll(/data:image\/([a-z+]+);base64,([A-Za-z0-9+/=]+)/gi)]
+    .map((m) => ({ formato: m[1], base64: m[2] }))
+    .sort((a, b) => b.base64.length - a.base64.length);
+
+  let plano = decodificarEntidades(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' '),
+  ).replace(/\s+/g, ' ').trim();
+
+  // Sólo el tramo con datos. Más abajo la página trae encabezados de tablas
+  // vacías —DICTAMENES, RESERVAS, DEMANDAS— que repiten palabras como CLASE o
+  // PRESENTACION y descolocan el reconocimiento.
+  const PLANO = sinTildes(plano);
+  const ini = PLANO.indexOf('DATOS GENERALES');
+  const fin = PLANO.indexOf('DICTAMENES');
+  if (ini >= 0) plano = plano.slice(ini, fin > ini ? fin : undefined);
+
+  // ── Titulares ─────────────────────────────────────────────────────────────
+  // Pueden ser varios: cada uno empieza con NOMBRE:. Se recorta el tramo de
+  // titularidad y se parte ahí, para que un cotitular no quede afuera.
+  const P = sinTildes(plano);
+  const iNombre = P.indexOf('NOMBRE:');
+  const iGestion = P.indexOf('GESTION DEL TRAMITE');
+  const tramoTitulares =
+    iNombre >= 0 ? plano.slice(iNombre, iGestion > iNombre ? iGestion : undefined) : '';
+
+  const titulares: TitularINPI[] = tramoTitulares
+    .split(/(?=NOMBRE:)/i)
+    .map((t) => t.trim())
+    .filter((t) => sinTildes(t).startsWith('NOMBRE:'))
+    .map((t) => {
+      const crudo = campoDe(t, 'NOMBRE:');
+      const m = crudo.match(/^(.*?)\s*(\d+[.,]\d+)\s*%\s*$/);
+      return {
+        nombre: (m ? m[1] : crudo).trim(),
+        porcentaje: m ? m[2] : '',
+        tipoDocumento: campoDe(t, 'TIPO DNI:'),
+        documento: campoDe(t, 'DNI:'),
+        genero: campoDe(t, 'GENERO:'),
+        pais: campoDe(t, 'PAIS:'),
+        cuit: campoDe(t, 'CUIT:').replace(/\D/g, ''),
+        domicilioReal: campoDe(t, 'DOMICILIO REAL:'),
+        localidad: campoDe(t, 'LOCALIDAD:'),
+        codigoPostal: campoDe(t, 'CP.'),
+      };
+    });
+
+  // La limitación termina donde empieza el primer titular, no donde termina la
+  // ficha. Por eso se corta el tramo antes de buscarla.
+  const tramoGeneral = iNombre >= 0 ? plano.slice(0, iNombre) : plano;
+
+  return {
+    presentacion: campoDe(tramoGeneral, 'PRESENTACION:'),
+    denominacion: campoDe(tramoGeneral, 'DENOMINACION:'),
+    tipoMarca: campoDe(tramoGeneral, 'TIPO DE MARCA:'),
+    domicilioLegal: campoDe(tramoGeneral, 'DOMICILO LEGAL:') || campoDe(tramoGeneral, 'DOMICILIO LEGAL:'),
+    renovacionDe: campoDe(tramoGeneral, 'RENOVACION DE:').replace(/\D/g, ''),
+    renovadaPor: campoDe(tramoGeneral, 'RENOVADA POR:').replace(/\D/g, ''),
+    clase: campoDe(tramoGeneral, 'CLASE:'),
+    proteccion: campoDe(tramoGeneral, 'PROTECCION:'),
+    limitacion: campoDe(tramoGeneral, 'LIMITACION:'),
+    titulares,
+    agente: {
+      numero: (campoDe(plano, 'AGENTE:').match(/^\s*(\d+)/) || ['', ''])[1],
+      nombre: campoDe(plano, 'AGENTE:').replace(/^\s*\d+\s*/, '').trim(),
+      caracter: campoDe(plano, 'CARACTER:'),
+    },
+    resolucion: {
+      estado: campoDe(plano, 'RESOLUCION:').replace(/[[\]]/g, '').trim(),
+      fechaProyecto: campoDe(plano, 'FEC DE PROY:'),
+      numero: campoDe(plano, 'NRO:').replace(/\D/g, ''),
+      tipo: campoDe(plano, 'TIPO:'),
+      motivo: campoDe(plano, 'MOTIVO:'),
+      notificacion: campoDe(plano, 'NOTIFICACION:'),
+      boletin: campoDe(plano, 'BOLETIN:').replace(/\D/g, ''),
+      observacion: campoDe(plano, 'OBSERVACION:'),
+      disposicion: campoDe(plano, 'DISPOSICION:'),
+      vence: campoDe(plano, 'VENCE:'),
+    },
+    ubicacionActual: campoDe(plano, 'UBICACION ACTUAL:'),
+    logo: embebidas[0] || null,
+  };
+}
+
+/** Pide la ficha al INPI. Devuelve el HTML crudo. */
+export async function pedirFichaINPI(acta: string): Promise<string> {
+  const { default: axios } = await import('axios');
+  const BASE = 'https://portaltramites.inpi.gob.ar';
+  const r = await axios.post(
+    `${BASE}/MarcasConsultas/Resultado`,
+    new URLSearchParams({ acta }).toString(),
+    {
+      timeout: 30_000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'text/html,application/xhtml+xml',
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+          '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'es-AR,es;q=0.9',
+        Referer: `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
+        Origin: BASE,
+      },
+      maxRedirects: 5,
+      validateStatus: () => true,
+    },
+  );
+  if (r.status !== 200) throw new Error(`El portal respondió HTTP ${r.status}`);
+  return String(r.data);
+}
+
+// ── GET /api/boletin/detalle/probar ──────────────────────────────────────────
 //
-//   · el LOGO, embebido como `data:image/…;base64,…` — no hay que pedirlo
-//     aparte, viaja adentro del HTML
-//   · el CUIT del titular — las 843 se importaron sin él porque Damlong no lo
-//     guarda, y sin CUIT del titular no hay escrito de oposición
-//   · PROTECCION y LIMITACION, o sea el (57): los productos y servicios que
-//     la marca ampara de verdad, que es lo que funda el cotejo de afinidad
+// Reconocimiento, no carga. Trae la ficha, la parsea y la devuelve entera para
+// poder compararla campo por campo contra lo que muestra el portal en pantalla.
 //
-// Esta ruta es de RECONOCIMIENTO, no de carga. Extrae lo que puede reconocer y
-// además devuelve el texto plano de la ficha, para poder comparar campo por
-// campo contra lo que muestra el portal en pantalla antes de escribir nada en
-// la base. Un parser de HTML ajeno que nadie verificó contra el original es
-// una forma silenciosa de llenar la cartera de datos equivocados.
+// Se mantiene separado de la carga masiva a propósito: un parser de HTML ajeno
+// que nadie verificó contra el original no falla con un error, guarda el dato
+// equivocado y sigue. En la primera corrida de esta ruta la limitación se
+// tragó entera la titularidad, y los nombres con acento volvían rotos
+// —LEGUIZAM&#211;N— porque no se decodificaban las entidades numéricas. Dos
+// errores que, escritos a la base, habrían quedado en 843 filas.
 //
 //   ?acta=4565664
 router.get('/detalle/probar', async (req, res: Response) => {
@@ -1365,134 +1572,43 @@ router.get('/detalle/probar', async (req, res: Response) => {
   const acta = String(req.query.acta || '').replace(/\D/g, '');
   if (!acta) return res.status(400).json({ error: 'Falta el acta. Ej: ?acta=4565664' });
 
-  const { default: axios } = await import('axios');
-  const BASE = 'https://portaltramites.inpi.gob.ar';
-  const UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
   let html = '';
   try {
-    const r = await axios.post(
-      `${BASE}/MarcasConsultas/Resultado`,
-      new URLSearchParams({ acta }).toString(),
-      {
-        timeout: 30_000,
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'text/html,application/xhtml+xml',
-          'User-Agent': UA,
-          'Accept-Language': 'es-AR,es;q=0.9',
-          Referer: `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
-          Origin: BASE,
-        },
-        maxRedirects: 5,
-        validateStatus: () => true,
-      },
-    );
-    if (r.status !== 200) {
-      return res.status(502).json({ error: `El portal respondió HTTP ${r.status}` });
-    }
-    html = String(r.data);
+    html = await pedirFichaINPI(acta);
   } catch (err: any) {
     return res.status(502).json({ error: `No se pudo pedir la ficha: ${err.message}` });
   }
 
-  // ── Las imágenes embebidas ────────────────────────────────────────────────
-  // Se recogen todas y se ordenan por peso. El logo de la marca es la grande;
-  // lo demás, si hay algo, son iconos del sitio. No se adivina cuál es por su
-  // posición ni por el nombre del campo: se mide.
-  const embebidas = [...html.matchAll(/data:image\/([a-z+]+);base64,([A-Za-z0-9+/=]+)/gi)]
-    .map((m) => ({ formato: m[1], base64: m[2] }))
-    .sort((a, b) => b.base64.length - a.base64.length);
+  const ficha = parsearFichaINPI(html);
 
-  const imagenes: any[] = [];
-  for (const img of embebidas.slice(0, 3)) {
-    const bytes = Buffer.from(img.base64, 'base64');
-    const entrada: any = { formato: img.formato, bytes: bytes.length };
+  let logo: any = null;
+  if (ficha.logo) {
+    const bytes = Buffer.from(ficha.logo.base64, 'base64');
+    logo = { formato: ficha.logo.formato, bytes: bytes.length };
     try {
       const h = await calcularHuella(bytes);
-      entrada.huella = { hash: h.hash, proporcion: h.proporcion };
+      logo.huella = { hash: h.hash, proporcion: h.proporcion };
     } catch (e: any) {
-      entrada.error = e.message;
+      logo.error = e.message;
     }
-    imagenes.push(entrada);
   }
 
-  // ── La ficha, como texto ──────────────────────────────────────────────────
-  const plano = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // Sin tildes y en mayúsculas, para que el reconocimiento de etiquetas no
-  // dependa de cómo estén acentuadas. El portal además escribe «DOMICILO»,
-  // sin la i: se busca por lo que dice, no por lo que debería decir.
-  const sinTildes = (s: string) =>
-    s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
-  const PLANO = sinTildes(plano);
-
-  const ETIQUETAS = [
-    'PRESENTACION:', 'DENOMINACION:', 'TIPO DE MARCA:', 'DOMICILO LEGAL:',
-    'DOMICILIO LEGAL:', 'RENOVACION DE:', 'RENOVADA POR:', 'NRO DE EFECTOR:',
-    'CLASE:', 'PROTECCION:', 'LIMITACION:', 'TITULARIDAD', 'DATOS GENERALES',
-    'GRILLA DIGITAL', 'CUIT', 'TITULAR', 'AGENTE', 'ESTADO:', 'VENCIMIENTO',
-  ].map(sinTildes);
-
-  /** Lo que sigue a una etiqueta, hasta que empieza la siguiente. */
-  const campo = (etiqueta: string): string => {
-    const et = sinTildes(etiqueta);
-    const i = PLANO.indexOf(et);
-    if (i < 0) return '';
-    const desde = i + et.length;
-    let fin = PLANO.length;
-    for (const otra of ETIQUETAS) {
-      if (otra === et) continue;
-      const j = PLANO.indexOf(otra, desde);
-      if (j >= 0 && j < fin) fin = j;
-    }
-    return plano.slice(desde, fin).trim().slice(0, 600);
-  };
-
-  const reconocido = {
-    presentacion: campo('PRESENTACION:'),
-    denominacion: campo('DENOMINACION:'),
-    tipoMarca: campo('TIPO DE MARCA:'),
-    domicilioLegal: campo('DOMICILO LEGAL:') || campo('DOMICILIO LEGAL:'),
-    renovacionDe: campo('RENOVACION DE:'),
-    renovadaPor: campo('RENOVADA POR:'),
-    clase: campo('CLASE:'),
-    proteccion: campo('PROTECCION:'),
-    limitacion: campo('LIMITACION:'),
-  };
-
-  const faltantes = Object.entries(reconocido)
-    .filter(([, v]) => !v)
+  const { logo: _descartado, ...resto } = ficha;
+  const vacios = Object.entries(resto)
+    .filter(([, v]) => v === '' || (Array.isArray(v) && v.length === 0))
     .map(([k]) => k);
 
   return res.json({
     acta,
-    veredicto: imagenes.length
-      ? `✅ LA FICHA TRAE EL LOGO: ${imagenes.length} imagen(es) embebida(s), la mayor de ` +
-        `${imagenes[0].bytes} bytes, con huella calculada. El camino entero funciona.`
-      : '❌ La ficha llegó pero sin ninguna imagen embebida. Puede ser una marca sin ' +
-        'logo (denominativa) o que el logo venga de otra forma. Probá con una figurativa.',
-    bytesDeLaFicha: html.length,
-    imagenes,
-    reconocido,
-    faltantes,
+    veredicto: logo
+      ? `✅ Ficha completa y logo de ${logo.bytes} bytes con huella calculada.`
+      : '✅ Ficha completa. Sin logo embebido: puede ser una denominativa, que no tiene.',
+    ficha: { ...resto, logo },
+    camposVacios: vacios,
     aviso:
-      'COMPARÁ `reconocido` contra lo que muestra el portal en pantalla para esta misma ' +
-      'acta, campo por campo, antes de que esto escriba nada en la base. Si algo no ' +
-      'coincide, el parser está mal y hay que corregirlo: un dato equivocado guardado en ' +
-      'silencio es peor que un campo vacío.',
-    // Para poder arreglar el parser sin tener que pedir otra captura de pantalla.
-    fichaEnTextoPlano: plano.slice(0, 4000),
+      'Compará campo por campo contra el portal antes de la carga masiva. Interesa sobre ' +
+      'todo `limitacion` (no debe contener titulares), los nombres con acento (no deben ' +
+      'traer &#NNN;) y `titulares` (deben estar TODOS los cotitulares, con su porcentaje).',
   });
 });
 
