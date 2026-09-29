@@ -958,26 +958,209 @@ router.get('/logo/probar', async (req, res: Response) => {
   });
 });
 
+// ── Denominación y elemento figurativo ───────────────────────────────────────
+//
+// Las marcas importadas del export de Damlong traen el paréntesis pegado al
+// nombre: «NAHANA (CASA)». NO es basura, y por poco lo tratamos como tal.
+//
+// Damlong exige cargar así las mixtas y las figurativas: el paréntesis
+// describe el DIBUJO. «NAHANA (CASA)» es la denominación NAHANA acompañada de
+// un dibujo de una casa. Es una descripción del elemento figurativo escrita
+// por el propio agente, marca por marca, a lo largo de años.
+//
+// Eso vale mucho más de lo que parece. Es exactamente el dato que hace falta
+// para clasificar por Viena, y lo tenemos ya escrito y sin costo: una casa es
+// 07.01, y no hizo falta mirar la imagen ni pagarle a un clasificador por
+// visión artificial para saberlo. También sirve para verificar la
+// clasificación automática cuando exista: si el modelo dice «flor» donde el
+// agente escribió «casa», hay algo mal y conviene mirarlo.
+//
+// Por eso se separa en dos, en lugar de descartarse:
+//
+//   denominacion       → el signo denominativo, limpio, que es lo que se
+//                        coteja fonética y gráficamente contra el Boletín
+//   elementoFigurativo → la descripción del dibujo, que alimenta Viena y el
+//                        cotejo ideológico
+//
+// Dejar el paréntesis dentro de la denominación arruina el cotejo: los ejes
+// fonético y gráfico se calculan sobre la cadena entera, y siete caracteres
+// que ninguna solicitud del Boletín va a tener bajan el puntaje de todas las
+// comparaciones de esa marca. Lo que se pierde ahí es una oposición, con el
+// plazo perentorio del art. 15 corriendo igual.
+//
+// Se separa sólo lo que está entre paréntesis o corchetes. No se tocan
+// guiones, apóstrofos, acentos ni `&`: esos sí aparecen en marcas de verdad.
+export function partirDenominacion(d: string): {
+  denominacion: string;
+  elementoFigurativo: string;
+} {
+  const anotaciones = (d.match(/[([][^)\]]*[)\]]/g) || [])
+    .map((a) => a.replace(/^[([]|[)\]]$/g, '').trim())
+    .filter(Boolean);
+
+  return {
+    denominacion: d.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim(),
+    elementoFigurativo: anotaciones.join(' · '),
+  };
+}
+
+/** Sólo el signo denominativo, sin la descripción del dibujo. */
+export function denominacionLimpia(d: string): string {
+  return partirDenominacion(d).denominacion;
+}
+
+// ── GET /api/boletin/cartera/denominaciones ──────────────────────────────────
+//
+// Cuántas marcas de la cartera traen el dibujo anotado entre paréntesis, qué
+// dibujos son y con qué frecuencia aparece cada uno.
+//
+// Dos cosas se miden acá, y las dos hacen falta antes de tocar un solo dato:
+//
+//   · Cuánto cotejo está degradado hoy. Cada marca con el paréntesis adentro
+//     de la denominación se está vigilando peor que las demás.
+//
+//   · Qué hay en el catálogo de dibujos. Si se repiten quince o veinte
+//     descripciones, mapearlas a Viena es un rato de trabajo y queda hecho
+//     para siempre. Si hay cuatrocientas distintas, es otro problema.
+//
+// Se cruza con el tipo de marca porque ahí aparecen las anomalías: una
+// DENOMINATIVA con dibujo anotado está mal tipificada —o mal cargada— y una
+// FIGURATIVA sin nada entre paréntesis no tiene ningún dato de su dibujo.
+//
+//   ?muestra=40   cuántos ejemplos devolver (por defecto 30)
+router.get('/cartera/denominaciones', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const cuantos = Math.min(Math.max(parseInt(String(req.query.muestra || '30')) || 30, 1), 300);
+
+  const marcas = await prisma.marca.findMany({
+    select: { acta: true, denominacion: true, claseNiza: true, tipoMarca: true, titularNombre: true },
+    orderBy: { denominacion: 'asc' },
+  });
+
+  // `original` se guarda aparte porque el spread pisa `denominacion` con la
+  // versión limpia, y para poder mostrar el antes y el después hacen falta las dos.
+  const partidas = marcas.map((m) => ({
+    ...m,
+    original: m.denominacion,
+    ...partirDenominacion(m.denominacion),
+  }));
+  const conDibujo = partidas.filter((m) => m.elementoFigurativo !== '');
+
+  // Catálogo de dibujos: la materia prima para la tabla de Viena.
+  const catalogo = new Map<string, number>();
+  for (const m of conDibujo) {
+    for (const parte of m.elementoFigurativo.split(' · ')) {
+      const clave = parte.toUpperCase();
+      catalogo.set(clave, (catalogo.get(clave) || 0) + 1);
+    }
+  }
+  const ranking = [...catalogo.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([dibujo, veces]) => ({ dibujo, veces }));
+
+  const contarPorTipo = (lista: typeof partidas) => {
+    const t: Record<string, number> = {};
+    for (const m of lista) t[String(m.tipoMarca)] = (t[String(m.tipoMarca)] || 0) + 1;
+    return t;
+  };
+
+  // Figurativas puras: el paréntesis es TODO lo que hay, porque no hay
+  // denominación que proteger. Es lo correcto, no un error: esas marcas se
+  // cotejan sólo por dibujo y no tienen eje fonético.
+  const sinDenominacion = conDibujo.filter((m) => m.denominacion.length < 2);
+
+  // Anomalías: tipo y contenido no concuerdan.
+  const denominativasConDibujo = conDibujo.filter((m) => String(m.tipoMarca) === 'DENOMINATIVA');
+  const figurativasSinDibujo = partidas.filter(
+    (m) => ['FIGURATIVA', 'MIXTA'].includes(String(m.tipoMarca)) && m.elementoFigurativo === '',
+  );
+
+  return res.json({
+    total: marcas.length,
+
+    conDibujoAnotado: {
+      cantidad: conDibujo.length,
+      porcentaje: marcas.length ? `${((conDibujo.length / marcas.length) * 100).toFixed(1)}%` : '0%',
+      porTipo: contarPorTipo(conDibujo),
+      nota: 'Son las que hoy se cotejan con el paréntesis adentro de la denominación, ' +
+            'o sea con el puntaje degradado en los ejes fonético y gráfico.',
+    },
+
+    catalogoDeDibujos: {
+      distintos: ranking.length,
+      nota: 'Insumo directo para la clasificación de Viena, ya escrito por el agente. ' +
+            'Si son pocos y repetidos, el mapeo a Viena se hace una vez y queda.',
+      top: ranking.slice(0, 60),
+    },
+
+    figurativasPuras: {
+      cantidad: sinDenominacion.length,
+      nota: 'El paréntesis es todo: no hay denominación porque la marca es sólo dibujo. ' +
+            'Correcto, no es un error. Se cotejan sólo por imagen, sin eje fonético.',
+      porTipo: contarPorTipo(sinDenominacion),
+      casos: sinDenominacion.slice(0, 20).map((m) => ({
+        acta: m.acta, original: m.denominacion, dibujo: m.elementoFigurativo, tipo: m.tipoMarca,
+      })),
+    },
+
+    anomalias: {
+      nota: 'Tipo y contenido no concuerdan. Conviene mirarlas de a una.',
+      denominativasConDibujo: {
+        cantidad: denominativasConDibujo.length,
+        casos: denominativasConDibujo.slice(0, 15).map((m) => ({
+          acta: m.acta, original: m.denominacion, dibujo: m.elementoFigurativo,
+        })),
+      },
+      mixtasOFigurativasSinDibujo: {
+        cantidad: figurativasSinDibujo.length,
+        casos: figurativasSinDibujo.slice(0, 15).map((m) => ({
+          acta: m.acta, denominacion: m.denominacion, tipo: m.tipoMarca,
+        })),
+      },
+    },
+
+    muestra: conDibujo.slice(0, cuantos).map((m) => ({
+      acta: m.acta,
+      guardadoHoy: m.original,
+      denominacionQuedaria: m.denominacion,
+      dibujoQuedaria: m.elementoFigurativo,
+      clase: m.claseNiza,
+      tipo: m.tipoMarca,
+      titular: m.titularNombre,
+    })),
+  });
+});
+
 // ── GET /api/boletin/logo/grilla ─────────────────────────────────────────────
 //
-// Segunda pregunta, después de la primera: sabemos que el logo existe como
-// imagen embebida (`data:image/jpg;base64,...`) porque se copió una desde el
-// portal a mano. Lo que no sabemos es **en qué respuesta viaja**, y sin eso no
-// se puede bajar sola.
+// ¿Viene el logo en la respuesta de la grilla del portal?
 //
-// No está en `MarcasConsultas/Resultado`: esa página se revisó y no contiene
-// ningún `data:image`. Queda la otra fuente, la que la grilla del portal usa
-// de verdad: el POST a `GrillaMarcasAvanzada`, que ya se usa en la app para
-// buscar antecedentes. Su respuesta se parsea campo por campo, quedándose sólo
-// con siete —acta, denominación, clase, tipo, titular, resolución, fechas— y
-// descartando en silencio todo lo demás. Si la imagen viene ahí, la venimos
-// tirando a la basura en cada búsqueda desde el primer día.
+// Sabemos que el logo existe como imagen embebida (`data:image/jpg;base64,…`)
+// porque se copió una a mano desde el portal: un JPEG de 227×227 en color. Lo
+// que no sabemos es en qué respuesta viaja, y sin eso no se puede bajar sola.
 //
-// Esta ruta devuelve el ítem **crudo**, sin filtrar, para poder verlo.
+// Descartado: `MarcasConsultas/Resultado` no contiene ningún `data:image`.
+// Queda la fuente que la grilla usa de verdad, el POST a
+// `GrillaMarcasAvanzada`, que la app ya usa para buscar antecedentes. Su
+// respuesta se parsea campo por campo quedándose con siete y descartando el
+// resto en silencio: si la imagen viene ahí, la venimos tirando desde el
+// primer día. Por eso esta ruta devuelve el ítem **crudo**.
 //
-// Busca el acta que se le pide: toma su denominación de nuestra base —ya
-// tenemos las 843 con acta y denominación— y con eso interroga la grilla, que
-// no acepta buscar por número de acta.
+// La grilla no busca por número de acta, así que hay que llegar a la marca por
+// su denominación. Y ahí está la trampa que costó la primera corrida: la
+// denominación guardada puede estar sucia, la búsqueda vuelve vacía, y una
+// búsqueda vacía NO dice nada sobre si la imagen viene o no. Son dos
+// respuestas distintas y antes se confundían en un solo veredicto.
+//
+// Ahora se prueba en cascada, de lo más preciso a lo más amplio, y se informa
+// cuál intento encontró la marca:
+//
+//   1. denominación tal como está, empieza con, en su clase
+//   2. denominación limpia, empieza con, en su clase
+//   3. denominación limpia, contiene, en su clase
+//   4. denominación limpia, contiene, en todas las clases
+//   5. igual, incluyendo marcas no vigentes
 //
 //   ?acta=3606253
 router.get('/logo/grilla', async (req, res: Response) => {
@@ -996,6 +1179,8 @@ router.get('/logo/grilla', async (req, res: Response) => {
              'Probá con un acta de la cartera.',
     });
   }
+
+  const limpia = denominacionLimpia(marca.denominacion);
 
   const { default: axios } = await import('axios');
   const BASE = 'https://portaltramites.inpi.gob.ar';
@@ -1017,54 +1202,73 @@ router.get('/logo/grilla', async (req, res: Response) => {
     return res.status(502).json({ error: `No se pudo abrir sesión en el portal: ${err.message}` });
   }
 
-  let data: any;
-  try {
-    const r = await axios.post(
-      `${BASE}/MarcasConsultas/GrillaMarcasAvanzada`,
-      {
-        Tipo_Resolucion: '',
-        Clase: String(marca.claseNiza),
-        TipoBusquedaDenominacion: '0',      // 0 = Empieza con: más preciso para una denominación exacta
-        Denominacion: marca.denominacion,
-        Titular: '',
-        TipoBusquedaTitular: '1',
-        Fecha_IngresoDesde: '', Fecha_IngresoHasta: '',
-        Fecha_ResolucionDesde: '', Fecha_ResolucionHasta: '',
-        vigentes: true,
-        limit: 50,
-        offset: 0,
+  const consultar = async (cuerpo: any): Promise<any> => {
+    const { data } = await axios.post(`${BASE}/MarcasConsultas/GrillaMarcasAvanzada`, cuerpo, {
+      timeout: 25_000,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': UA,
+        Referer: BUSQUEDA_URL,
+        Origin: BASE,
+        ...(cookies ? { Cookie: cookies } : {}),
       },
-      {
-        timeout: 25_000,
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/javascript, */*; q=0.01',
-          'X-Requested-With': 'XMLHttpRequest',
-          'User-Agent': UA,
-          Referer: BUSQUEDA_URL,
-          Origin: BASE,
-          ...(cookies ? { Cookie: cookies } : {}),
-        },
-        maxRedirects: 0,
-      },
-    );
-    data = r.data;
-  } catch (err: any) {
-    return res.status(502).json({ error: `La grilla falló: ${err.message}` });
+      maxRedirects: 0,
+    });
+    return data;
+  };
+
+  const base = {
+    Tipo_Resolucion: '',
+    Titular: '',
+    TipoBusquedaTitular: '1',
+    Fecha_IngresoDesde: '', Fecha_IngresoHasta: '',
+    Fecha_ResolucionDesde: '', Fecha_ResolucionHasta: '',
+    limit: 50,
+    offset: 0,
+  };
+
+  const cascada = [
+    { nombre: '1 · tal cual · empieza con · su clase',
+      cuerpo: { ...base, Denominacion: marca.denominacion, TipoBusquedaDenominacion: '0', Clase: String(marca.claseNiza), vigentes: true } },
+    { nombre: '2 · limpia · empieza con · su clase',
+      cuerpo: { ...base, Denominacion: limpia, TipoBusquedaDenominacion: '0', Clase: String(marca.claseNiza), vigentes: true } },
+    { nombre: '3 · limpia · contiene · su clase',
+      cuerpo: { ...base, Denominacion: limpia, TipoBusquedaDenominacion: '1', Clase: String(marca.claseNiza), vigentes: true } },
+    { nombre: '4 · limpia · contiene · todas las clases',
+      cuerpo: { ...base, Denominacion: limpia, TipoBusquedaDenominacion: '1', Clase: '', vigentes: true } },
+    { nombre: '5 · limpia · contiene · todas · incluyendo no vigentes',
+      cuerpo: { ...base, Denominacion: limpia, TipoBusquedaDenominacion: '1', Clase: '', vigentes: false } },
+  ];
+
+  const bitacora: { intento: string; filas: number; actaEncontrada: boolean; error?: string }[] = [];
+  let item: any = null;
+  let intentoGanador = '';
+  let ultimaLista: any[] = [];
+
+  for (const paso of cascada) {
+    let lista: any[] = [];
+    try {
+      const data = await consultar(paso.cuerpo);
+      lista = Array.isArray(data) ? data : (data?.data ?? data?.marcas ?? data?.rows ?? data?.resultado ?? []);
+    } catch (err: any) {
+      bitacora.push({ intento: paso.nombre, filas: 0, actaEncontrada: false, error: err.message });
+      continue;
+    }
+    ultimaLista = lista;
+    const exacto = lista.find((i) => String(i.Acta ?? i.acta ?? '').replace(/\D/g, '') === acta);
+    bitacora.push({ intento: paso.nombre, filas: lista.length, actaEncontrada: Boolean(exacto) });
+    if (exacto) { item = exacto; intentoGanador = paso.nombre; break; }
   }
 
-  const lista: any[] = Array.isArray(data)
-    ? data
-    : (data?.data ?? data?.marcas ?? data?.rows ?? data?.resultado ?? []);
+  // Si ningún intento dio con el acta exacta pero alguno trajo filas, sirve
+  // igual para la pregunta de fondo: cualquier fila de la grilla alcanza para
+  // ver si el objeto trae imagen.
+  const itemParaInspeccionar = item ?? ultimaLista[0] ?? null;
 
-  const completo = JSON.stringify(data);
-  const item =
-    lista.find((i) => String(i.Acta ?? i.acta ?? '').replace(/\D/g, '') === acta) ?? lista[0] ?? null;
-
-  // ¿Alguno de los campos del ítem es una imagen embebida? Se busca por
-  // contenido, no por nombre de campo: el nombre puede ser cualquiera.
-  const campoImagen = item
-    ? Object.entries(item).find(
+  const campoImagen = itemParaInspeccionar
+    ? Object.entries(itemParaInspeccionar).find(
         ([, v]) => typeof v === 'string' && /^\s*(data:image\/|\/9j\/|iVBORw0KGgo)/.test(v),
       )
     : undefined;
@@ -1079,35 +1283,50 @@ router.get('/logo/grilla', async (req, res: Response) => {
     }
   }
 
-  // El ítem crudo, recortando los campos larguísimos para poder leerlo: de una
-  // imagen basta ver que está y cuánto pesa.
-  const itemLegible = item
-    ? Object.fromEntries(
-        Object.entries(item).map(([k, v]) =>
-          typeof v === 'string' && v.length > 120
-            ? [k, `«${v.length} caracteres» ${v.slice(0, 60)}…`]
-            : [k, v],
-        ),
-      )
-    : null;
+  const legible = (o: any) =>
+    o
+      ? Object.fromEntries(
+          Object.entries(o).map(([k, v]) =>
+            typeof v === 'string' && v.length > 120
+              ? [k, `«${v.length} caracteres» ${v.slice(0, 60)}…`]
+              : [k, v],
+          ),
+        )
+      : null;
+
+  // Tres respuestas distintas, que antes se confundían en una:
+  //   · encontró la marca y trae imagen
+  //   · encontró la marca y NO trae imagen  → la imagen sale de otra petición
+  //   · no encontró nada                    → no se probó nada
+  const veredicto = campoImagen
+    ? `✅ LA IMAGEN VIENE EN LA GRILLA, en el campo «${campoImagen[0]}». ` +
+      'Los logos de la cartera se bajan solos, sin buscar nada a mano.'
+    : itemParaInspeccionar
+      ? '❌ La grilla SÍ devuelve la marca, pero el objeto no trae ninguna imagen. ' +
+        'La imagen sale de otra petición: la del botón «+». Mirá `clavesDelItem`.'
+      : '⚠️ NO SE PROBÓ NADA: ningún intento encontró la marca en el portal, así que ' +
+        'no hay objeto que inspeccionar. Esto no dice si la grilla trae la imagen o no. ' +
+        'Mirá `bitacora` para ver dónde se cortó.';
 
   return res.json({
     acta,
-    buscadoComo: { denominacion: marca.denominacion, clase: marca.claseNiza, tipo: marca.tipoMarca },
-    veredicto: campoImagen
-      ? `✅ LA IMAGEN VIENE EN LA GRILLA, en el campo «${campoImagen[0]}». ` +
-        'Los logos de la cartera se bajan solos, sin buscar nada a mano.'
-      : /data:image\/|base64/i.test(completo)
-        ? '🔎 Hay algo con pinta de imagen en la respuesta pero no en un campo del ítem. ' +
-          'Mirá `clavesDelItem` y `respuestaTruncada`.'
-        : '❌ La grilla no trae la imagen. Hay que buscar la petición del botón «+».',
-    encontrado: Boolean(item),
-    resultadosDeLaGrilla: lista.length,
-    clavesDelItem: item ? Object.keys(item) : [],
-    campoImagen: campoImagen ? { nombre: campoImagen[0], caracteres: String(campoImagen[1]).length } : null,
+    veredicto,
+    denominacion: {
+      guardada: marca.denominacion,
+      limpia,
+      estabaSucia: limpia !== marca.denominacion,
+      clase: marca.claseNiza,
+      tipo: marca.tipoMarca,
+    },
+    intentoGanador: intentoGanador || null,
+    actaExacta: Boolean(item),
+    bitacora,
+    clavesDelItem: itemParaInspeccionar ? Object.keys(itemParaInspeccionar) : [],
+    campoImagen: campoImagen
+      ? { nombre: campoImagen[0], caracteres: String(campoImagen[1]).length }
+      : null,
     huella,
-    itemLegible,
-    respuestaTruncada: lista.length ? undefined : completo.slice(0, 800),
+    itemLegible: legible(itemParaInspeccionar),
   });
 });
 
