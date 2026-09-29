@@ -1330,6 +1330,173 @@ router.get('/logo/grilla', async (req, res: Response) => {
   });
 });
 
+// ── GET /api/boletin/detalle/probar ──────────────────────────────────────────
+//
+// La ficha completa de una marca, desde el INPI, sabiendo sólo el acta.
+//
+// Cómo se llega, que es lo que costó averiguar: NO es un GET con el acta en la
+// dirección —eso devuelve la página armada pero vacía, 31 KB de cáscara— sino
+// un POST con el acta en el cuerpo, como formulario:
+//
+//     POST https://portaltramites.inpi.gob.ar/MarcasConsultas/Resultado
+//     Content-Type: application/x-www-form-urlencoded
+//     acta=4565664
+//
+// Un solo campo. Esa página trae, en una sola consulta, tres cosas que se
+// venían persiguiendo por separado:
+//
+//   · el LOGO, embebido como `data:image/…;base64,…` — no hay que pedirlo
+//     aparte, viaja adentro del HTML
+//   · el CUIT del titular — las 843 se importaron sin él porque Damlong no lo
+//     guarda, y sin CUIT del titular no hay escrito de oposición
+//   · PROTECCION y LIMITACION, o sea el (57): los productos y servicios que
+//     la marca ampara de verdad, que es lo que funda el cotejo de afinidad
+//
+// Esta ruta es de RECONOCIMIENTO, no de carga. Extrae lo que puede reconocer y
+// además devuelve el texto plano de la ficha, para poder comparar campo por
+// campo contra lo que muestra el portal en pantalla antes de escribir nada en
+// la base. Un parser de HTML ajeno que nadie verificó contra el original es
+// una forma silenciosa de llenar la cartera de datos equivocados.
+//
+//   ?acta=4565664
+router.get('/detalle/probar', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const acta = String(req.query.acta || '').replace(/\D/g, '');
+  if (!acta) return res.status(400).json({ error: 'Falta el acta. Ej: ?acta=4565664' });
+
+  const { default: axios } = await import('axios');
+  const BASE = 'https://portaltramites.inpi.gob.ar';
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+  let html = '';
+  try {
+    const r = await axios.post(
+      `${BASE}/MarcasConsultas/Resultado`,
+      new URLSearchParams({ acta }).toString(),
+      {
+        timeout: 30_000,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'text/html,application/xhtml+xml',
+          'User-Agent': UA,
+          'Accept-Language': 'es-AR,es;q=0.9',
+          Referer: `${BASE}/marcasconsultas/busqueda/?Cod_Funcion=NQA0ADEA`,
+          Origin: BASE,
+        },
+        maxRedirects: 5,
+        validateStatus: () => true,
+      },
+    );
+    if (r.status !== 200) {
+      return res.status(502).json({ error: `El portal respondió HTTP ${r.status}` });
+    }
+    html = String(r.data);
+  } catch (err: any) {
+    return res.status(502).json({ error: `No se pudo pedir la ficha: ${err.message}` });
+  }
+
+  // ── Las imágenes embebidas ────────────────────────────────────────────────
+  // Se recogen todas y se ordenan por peso. El logo de la marca es la grande;
+  // lo demás, si hay algo, son iconos del sitio. No se adivina cuál es por su
+  // posición ni por el nombre del campo: se mide.
+  const embebidas = [...html.matchAll(/data:image\/([a-z+]+);base64,([A-Za-z0-9+/=]+)/gi)]
+    .map((m) => ({ formato: m[1], base64: m[2] }))
+    .sort((a, b) => b.base64.length - a.base64.length);
+
+  const imagenes: any[] = [];
+  for (const img of embebidas.slice(0, 3)) {
+    const bytes = Buffer.from(img.base64, 'base64');
+    const entrada: any = { formato: img.formato, bytes: bytes.length };
+    try {
+      const h = await calcularHuella(bytes);
+      entrada.huella = { hash: h.hash, proporcion: h.proporcion };
+    } catch (e: any) {
+      entrada.error = e.message;
+    }
+    imagenes.push(entrada);
+  }
+
+  // ── La ficha, como texto ──────────────────────────────────────────────────
+  const plano = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Sin tildes y en mayúsculas, para que el reconocimiento de etiquetas no
+  // dependa de cómo estén acentuadas. El portal además escribe «DOMICILO»,
+  // sin la i: se busca por lo que dice, no por lo que debería decir.
+  const sinTildes = (s: string) =>
+    s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+  const PLANO = sinTildes(plano);
+
+  const ETIQUETAS = [
+    'PRESENTACION:', 'DENOMINACION:', 'TIPO DE MARCA:', 'DOMICILO LEGAL:',
+    'DOMICILIO LEGAL:', 'RENOVACION DE:', 'RENOVADA POR:', 'NRO DE EFECTOR:',
+    'CLASE:', 'PROTECCION:', 'LIMITACION:', 'TITULARIDAD', 'DATOS GENERALES',
+    'GRILLA DIGITAL', 'CUIT', 'TITULAR', 'AGENTE', 'ESTADO:', 'VENCIMIENTO',
+  ].map(sinTildes);
+
+  /** Lo que sigue a una etiqueta, hasta que empieza la siguiente. */
+  const campo = (etiqueta: string): string => {
+    const et = sinTildes(etiqueta);
+    const i = PLANO.indexOf(et);
+    if (i < 0) return '';
+    const desde = i + et.length;
+    let fin = PLANO.length;
+    for (const otra of ETIQUETAS) {
+      if (otra === et) continue;
+      const j = PLANO.indexOf(otra, desde);
+      if (j >= 0 && j < fin) fin = j;
+    }
+    return plano.slice(desde, fin).trim().slice(0, 600);
+  };
+
+  const reconocido = {
+    presentacion: campo('PRESENTACION:'),
+    denominacion: campo('DENOMINACION:'),
+    tipoMarca: campo('TIPO DE MARCA:'),
+    domicilioLegal: campo('DOMICILO LEGAL:') || campo('DOMICILIO LEGAL:'),
+    renovacionDe: campo('RENOVACION DE:'),
+    renovadaPor: campo('RENOVADA POR:'),
+    clase: campo('CLASE:'),
+    proteccion: campo('PROTECCION:'),
+    limitacion: campo('LIMITACION:'),
+  };
+
+  const faltantes = Object.entries(reconocido)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+
+  return res.json({
+    acta,
+    veredicto: imagenes.length
+      ? `✅ LA FICHA TRAE EL LOGO: ${imagenes.length} imagen(es) embebida(s), la mayor de ` +
+        `${imagenes[0].bytes} bytes, con huella calculada. El camino entero funciona.`
+      : '❌ La ficha llegó pero sin ninguna imagen embebida. Puede ser una marca sin ' +
+        'logo (denominativa) o que el logo venga de otra forma. Probá con una figurativa.',
+    bytesDeLaFicha: html.length,
+    imagenes,
+    reconocido,
+    faltantes,
+    aviso:
+      'COMPARÁ `reconocido` contra lo que muestra el portal en pantalla para esta misma ' +
+      'acta, campo por campo, antes de que esto escriba nada en la base. Si algo no ' +
+      'coincide, el parser está mal y hay que corregirlo: un dato equivocado guardado en ' +
+      'silencio es peor que un campo vacío.',
+    // Para poder arreglar el parser sin tener que pedir otra captura de pantalla.
+    fichaEnTextoPlano: plano.slice(0, 4000),
+  });
+});
+
+
 router.use(authenticate);
 
 // ── GET /api/boletin — Listar boletines descargados ──────────────────────────
