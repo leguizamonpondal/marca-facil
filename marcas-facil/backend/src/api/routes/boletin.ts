@@ -1613,6 +1613,217 @@ router.get('/detalle/probar', async (req, res: Response) => {
 });
 
 
+/** «26/09/2035 0:00:00» → Date. Devuelve null si no se puede leer. */
+function fechaArgentina(s: string): Date | null {
+  const m = String(s || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return null;
+  const [, d, mes, a, h, min, seg] = m;
+  const f = new Date(
+    Number(a), Number(mes) - 1, Number(d),
+    Number(h || 0), Number(min || 0), Number(seg || 0),
+  );
+  return isNaN(f.getTime()) ? null : f;
+}
+
+// ── GET /api/boletin/cartera/enriquecer ──────────────────────────────────────
+//
+// Trae la ficha del INPI para las marcas de la cartera y guarda lo que falta:
+// el logo con su huella, los titulares con CUIT, los productos, la resolución,
+// la disposición y el vencimiento.
+//
+// EN SECO POR DEFECTO. Sin `&guardar=1` no escribe una sola fila: hace las
+// consultas, muestra qué guardaría y qué discrepancias encontró. La primera
+// corrida se mira antes de escribir.
+//
+// RESUMIBLE POR CONSTRUCCIÓN: toma sólo marcas con `fichaActualizadaEn` en
+// NULL, así que cada llamada sigue donde quedó la anterior. No hace falta
+// llevar la cuenta ni acordarse de dónde se cortó: si el proceso se corta a la
+// mitad, se vuelve a llamar y sigue.
+//
+// Va de a lotes porque son 843 marcas y una consulta por marca: el pedido HTTP
+// se agotaría mucho antes de terminar. Se llama varias veces.
+//
+// NO TOCA `denominacion` NI `tipoMarca`, aunque el INPI diga otra cosa. Esos
+// dos son criterio del matriculado: la denominación guardada puede estar
+// recortada respecto del registro —«NAHANA» contra «NAHANA JEANS DESDE 1989»—
+// y qué se coteja contra el Boletín, el signo completo o el elemento
+// dominante, no lo decide un parser. Las diferencias se REPORTAN en
+// `discrepancias` para que se miren.
+//
+//   ?limite=25    cuántas marcas por llamada (por defecto 10; máximo 100)
+//   &guardar=1    escribe. Sin esto, sólo informa.
+router.get('/cartera/enriquecer', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const limite = Math.min(Math.max(parseInt(String(req.query.limite || '10')) || 10, 1), 100);
+  const guardar = String(req.query.guardar || '') === '1';
+
+  const pendientes = await prisma.marca.findMany({
+    where: { fichaActualizadaEn: null, acta: { not: null } },
+    select: {
+      id: true, acta: true, denominacion: true, claseNiza: true,
+      tipoMarca: true, titularNombre: true, titularCuit: true, productos: true,
+    },
+    orderBy: { acta: 'asc' },
+    take: limite,
+  });
+
+  const quedanAntes = await prisma.marca.count({
+    where: { fichaActualizadaEn: null, acta: { not: null } },
+  });
+
+  const procesadas: any[] = [];
+  const fallidas: any[] = [];
+  const discrepancias: any[] = [];
+
+  for (const m of pendientes) {
+    const acta = m.acta!;
+    try {
+      const ficha = parsearFichaINPI(await pedirFichaINPI(acta));
+
+      // El dibujo. La huella se calcula acá y no después: si la imagen no se
+      // puede leer, conviene saberlo ahora y no cuando haga falta cotejar.
+      let huella: { hash: string; proporcion: number } | null = null;
+      let bytesLogo = 0;
+      if (ficha.logo) {
+        const buf = Buffer.from(ficha.logo.base64, 'base64');
+        bytesLogo = buf.length;
+        try {
+          const h = await calcularHuella(buf);
+          huella = { hash: h.hash, proporcion: h.proporcion };
+        } catch { /* imagen ilegible: se guarda igual, sin huella */ }
+      }
+
+      // El (57). «Toda la clase» es el dato oficial del INPI, no un relleno
+      // nuestro: dice que la marca ampara la clase entera. Distinto de copiarle
+      // el encabezado de Niza, que sería inventarle un alcance.
+      const productos = ficha.limitacion || ficha.proteccion || null;
+
+      // Los paréntesis de Damlong pasan a su campo. La denominación NO se
+      // toca: separarla es una decisión aparte.
+      const { elementoFigurativo } = partirDenominacion(m.denominacion);
+
+      const titularPrincipal =
+        [...ficha.titulares].sort(
+          (a, b) => parseFloat(b.porcentaje || '0') - parseFloat(a.porcentaje || '0'),
+        )[0] || null;
+
+      // ── Lo que no cuadra, se informa; no se corrige solo ──────────────────
+      const dif: string[] = [];
+      const tipoInpi = (ficha.tipoMarca || '').toUpperCase();
+      const tipoNuestro = String(m.tipoMarca).toUpperCase();
+      if (tipoInpi && !tipoNuestro.startsWith(tipoInpi.slice(0, 5))) {
+        dif.push(`tipo: nuestra base dice ${tipoNuestro}, el INPI dice ${ficha.tipoMarca}`);
+      }
+      const denomInpi = (ficha.denominacion || '').trim().toUpperCase();
+      const denomNuestra = partirDenominacion(m.denominacion).denominacion.toUpperCase();
+      if (denomInpi && denomNuestra && denomInpi !== denomNuestra) {
+        dif.push(`denominación: guardada «${denomNuestra}», INPI «${ficha.denominacion}»`);
+      }
+      if (String(ficha.clase) && parseInt(ficha.clase) && parseInt(ficha.clase) !== m.claseNiza) {
+        dif.push(`clase: guardada ${m.claseNiza}, INPI ${ficha.clase}`);
+      }
+      if (dif.length) discrepancias.push({ acta, denominacion: m.denominacion, diferencias: dif });
+
+      if (guardar) {
+        await prisma.$transaction(async (tx) => {
+          await tx.marca.update({
+            where: { id: m.id },
+            data: {
+              logoBase64: ficha.logo?.base64 ?? null,
+              logoFormato: ficha.logo?.formato ?? null,
+              huellaVisual: huella?.hash ?? null,
+              huellaProporcion: huella?.proporcion ?? null,
+              elementoFigurativo: elementoFigurativo || null,
+              productos: productos ?? undefined,
+              titularCuit: titularPrincipal?.cuit || undefined,
+              resolucion: ficha.resolucion.numero || undefined,
+              resolucionTipo: ficha.resolucion.tipo || null,
+              resolucionMotivo: ficha.resolucion.motivo || null,
+              disposicionNumero:
+                (ficha.resolucion.disposicion.match(/DI-[\w#-]+/) || [null])[0],
+              disposicionFecha: fechaArgentina(ficha.resolucion.disposicion),
+              boletinNotificacion: ficha.resolucion.boletin || null,
+              fechaVencimiento: fechaArgentina(ficha.resolucion.vence) ?? undefined,
+              fechaPublicacion: fechaArgentina(ficha.resolucion.notificacion) ?? undefined,
+              fichaActualizadaEn: new Date(),
+            },
+          });
+
+          // Se reemplazan sólo los titulares que vinieron del INPI. Los
+          // cargados a mano sobreviven: quien los escribió sabía algo que la
+          // ficha no dice.
+          await tx.titularMarca.deleteMany({ where: { marcaId: m.id, origen: 'INPI' } });
+          if (ficha.titulares.length) {
+            await tx.titularMarca.createMany({
+              data: ficha.titulares.map((t) => ({
+                marcaId: m.id,
+                nombre: t.nombre,
+                porcentaje: t.porcentaje || null,
+                cuit: t.cuit || null,
+                tipoDocumento: t.tipoDocumento || null,
+                documento: t.documento || null,
+                genero: t.genero || null,
+                pais: t.pais || null,
+                domicilioReal: t.domicilioReal || null,
+                localidad: t.localidad || null,
+                codigoPostal: t.codigoPostal || null,
+                origen: 'INPI',
+              })),
+            });
+          }
+        });
+      }
+
+      procesadas.push({
+        acta,
+        denominacion: m.denominacion,
+        logo: ficha.logo ? `${ficha.logo.formato} · ${bytesLogo} bytes` : 'sin logo',
+        huella: huella?.hash ?? null,
+        titulares: ficha.titulares.map((t) => `${t.nombre}${t.porcentaje ? ` ${t.porcentaje}%` : ''}`),
+        cuitPrincipal: titularPrincipal?.cuit || null,
+        productos: productos ? productos.slice(0, 120) : null,
+        resolucion: ficha.resolucion.numero || null,
+        vence: ficha.resolucion.vence || null,
+        elementoFigurativo: elementoFigurativo || null,
+      });
+    } catch (err: any) {
+      fallidas.push({ acta, denominacion: m.denominacion, error: err.message });
+    }
+
+    // Un respiro entre consultas. El portal es de un organismo público y esto
+    // son 843 pedidos: no hay ninguna razón para apurarlo.
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  const conLogo = procesadas.filter((p) => p.huella).length;
+  const conCuit = procesadas.filter((p) => p.cuitPrincipal).length;
+  const conProductos = procesadas.filter((p) => p.productos).length;
+
+  return res.json({
+    modo: guardar ? '💾 GUARDANDO' : '👁️ SECO — no se escribió nada. Agregá &guardar=1 para escribir.',
+    quedabanAntes: quedanAntes,
+    procesadasAhora: procesadas.length,
+    quedanDespues: guardar ? quedanAntes - procesadas.length : quedanAntes,
+    resumen: {
+      conLogoYHuella: conLogo,
+      conCuitDeTitular: conCuit,
+      conProductos: conProductos,
+      fallidas: fallidas.length,
+    },
+    discrepancias: {
+      nota:
+        'Diferencias entre lo guardado y lo que dice el INPI. NO se corrigen solas: ' +
+        'la denominación y el tipo de marca son criterio del matriculado.',
+      cantidad: discrepancias.length,
+      casos: discrepancias,
+    },
+    fallidas,
+    procesadas,
+  });
+});
+
+
 router.use(authenticate);
 
 // ── GET /api/boletin — Listar boletines descargados ──────────────────────────
