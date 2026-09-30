@@ -1425,25 +1425,46 @@ function campoDe(tramo: string, etiqueta: string, etiquetas = ETIQUETAS_FICHA): 
 }
 
 /**
- * Separa la RENUNCIA de los productos. El INPI las escribe juntas en el (57),
- * con `///` en el medio.
+ * Parte el (57) por `///`.
  *
- * No es prolijidad: la renuncia dice qué término el titular NO puede
- * reivindicar en exclusiva. Mezclada adentro de `productos` ensucia el cotejo
- * por afinidad —se compara contra palabras que justamente no están
- * monopolizadas— y se pierde de vista en el momento en que hay que citarla.
+ * ⚠️ `///` NO significa «acá viene la renuncia». Es un separador de tramos a
+ * secas, y el último tramo muchas veces no es una renuncia. La primera versión
+ * de esta función suponía lo contrario, y la corrida en seco del 30/09/2026 la
+ * desmintió en el acto: SAN FILI, VORKAMPFER y ME EVERYDAY terminan en
+ * `///NUEVA`, y guardaban «NUEVA» como si fuera la renuncia de la marca. Peor
+ * todavía, NAHANA JEANS tiene renuncia de verdad Y un `///NUEVA` detrás, así
+ * que las dos cosas conviven en el mismo campo.
  *
- * Si hay más de un `///`, corta en el primero y el resto queda en la renuncia.
+ * Entonces no se corta por posición, se clasifica por contenido:
+ *
+ *   · el primer tramo son los PRODUCTOS;
+ *   · los tramos que dicen RENUNCIA son la renuncia —pueden ser varios—;
+ *   · lo demás NO se guarda en ningún lado y se devuelve en `otros`, para
+ *     mirarlo. Escribirlo en `renuncia` sería inventarle al registro una
+ *     limitación que el titular no aceptó, y eso en un escrito se paga caro.
+ *
+ * La renuncia dice qué término el titular NO puede reivindicar en exclusiva.
+ * Mezclada adentro de `productos` ensucia el cotejo por afinidad —se compara
+ * contra palabras que justamente no están monopolizadas— y se pierde de vista
+ * en el momento en que hay que citarla.
  */
-export function partirRenuncia(
-  texto: string | null | undefined,
-): { productos: string | null; renuncia: string | null } {
-  if (!texto) return { productos: null, renuncia: null };
-  const i = texto.indexOf('///');
-  if (i < 0) return { productos: texto.trim() || null, renuncia: null };
+export function partirRenuncia(texto: string | null | undefined): {
+  productos: string | null;
+  renuncia: string | null;
+  otros: string[];
+} {
+  if (!texto) return { productos: null, renuncia: null, otros: [] };
+
+  const tramos = texto.split('///').map((s) => s.trim()).filter(Boolean);
+  if (!tramos.length) return { productos: null, renuncia: null, otros: [] };
+
+  const productos = tramos.shift() || null;
+  const esRenuncia = (s: string) => /RENUNCI/.test(sinTildes(s));
+
   return {
-    productos: texto.slice(0, i).trim() || null,
-    renuncia: texto.slice(i + 3).trim() || null,
+    productos,
+    renuncia: tramos.filter(esRenuncia).join(' /// ') || null,
+    otros: tramos.filter((s) => !esRenuncia(s)),
   };
 }
 
@@ -2047,22 +2068,35 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
 
   const reparadas: any[] = [];
   const fallidas: any[] = [];
-  // Si el texto completo vuelve a medir exactamente 800, no lo habíamos
-  // cortado: medía eso. Se informa en vez de dejarlo dando vueltas en la cola.
-  const seguianEn800: any[] = [];
+  const otrosTramos: any[] = [];
+  // Un campo que vuelve JUSTO en el tope no está completo: está cortado de
+  // nuevo, ahora en 20.000. Puede ser un (57) enorme de verdad, o una etiqueta
+  // que falta en ETIQUETAS_FICHA y hace que el campo se corra hasta el final
+  // de la página. Se distingue mirando la cola: si termina enumerando
+  // productos es lo primero, si termina en otra sección es lo segundo.
+  // (La versión anterior de este control miraba el 800 viejo en vez del tope
+  // vigente, así que no habría visto nada.)
+  const enElTope: any[] = [];
 
   for (const m of filas) {
     try {
       const ficha = parsearFichaINPI(await pedirFichaINPI(m.acta));
-      const { productos, renuncia } = partirRenuncia(
-        ficha.limitacion || ficha.proteccion || null,
-      );
+      const crudo = ficha.limitacion || ficha.proteccion || null;
+      const { productos, renuncia, otros } = partirRenuncia(crudo);
 
       if (!productos) {
         fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: 'la ficha volvió sin (57)' });
         continue;
       }
-      if (productos.length === 800 && !renuncia) seguianEn800.push({ acta: m.acta, denominacion: m.denominacion });
+      if (crudo && crudo.length >= TOPE_CAMPO) {
+        enElTope.push({
+          acta: m.acta,
+          denominacion: m.denominacion,
+          largo: crudo.length,
+          cola: crudo.slice(-300),
+        });
+      }
+      if (otros.length) otrosTramos.push({ acta: m.acta, denominacion: m.denominacion, otros });
 
       if (guardar) {
         await prisma.marca.update({
@@ -2094,9 +2128,18 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
   )) as { id: string; acta: string; denominacion: string; productos: string }[];
 
   const partidas: any[] = [];
+  const sinRenunciaReal: any[] = [];
   for (const m of pendientesDePartir) {
-    const { productos, renuncia } = partirRenuncia(m.productos);
-    if (!renuncia) continue;
+    const { productos, renuncia, otros } = partirRenuncia(m.productos);
+
+    // Tenía `///` pero ningún tramo dice RENUNCIA: el separador estaba
+    // marcando otra cosa. Se limpia `productos` igual —el tramo suelto no es
+    // parte de lo que la marca ampara— pero NO se le inventa una renuncia.
+    if (!renuncia) {
+      if (otros.length) sinRenunciaReal.push({ acta: m.acta, denominacion: m.denominacion, otros });
+      continue;
+    }
+
     if (guardar) {
       await prisma.marca.update({
         where: { id: m.id },
@@ -2115,10 +2158,14 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
       quedanDespues: guardar ? quedabanAntes - reparadas.length : quedabanAntes,
       caracteresRecuperados: reparadas.reduce((a, r) => a + r.gano, 0),
       fallidas,
-      seguianEn800: {
-        nota: 'Medían 800 de verdad; no las habíamos cortado.',
-        cantidad: seguianEn800.length,
-        casos: seguianEn800,
+      enElTope: {
+        nota:
+          `Volvieron justo en ${TOPE_CAMPO} caracteres, o sea cortadas otra vez. Mirá la ` +
+          'cola: si termina enumerando productos, el (57) es realmente así de largo y hay ' +
+          'que subir el tope. Si termina en otra cosa, falta una etiqueta en ETIQUETAS_FICHA ' +
+          'y el campo se está corriendo hasta el final de la página.',
+        cantidad: enElTope.length,
+        casos: enElTope,
       },
       reparadas: reparadas.slice(0, 30),
     },
@@ -2128,6 +2175,14 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
         'Separada de `productos` para que no ensucie el cotejo por afinidad.',
       separadasAhora: partidas.length,
       casos: partidas.slice(0, 30),
+    },
+    tramosSinClasificar: {
+      nota:
+        'Tramos separados por `///` que NO dicen RENUNCIA. No se guardan en ningún campo: ' +
+        'ponerlos en `renuncia` sería inventarle al registro una limitación que el titular ' +
+        'no aceptó. Se listan para decidir qué son.',
+      enFase1: otrosTramos,
+      enFase2: sinRenunciaReal,
     },
   });
 });
