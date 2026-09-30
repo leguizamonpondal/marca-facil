@@ -226,6 +226,19 @@ model Marca {
   //    dato bueno, que es justo lo que no puede pasar.
   productos       String?
 
+  // La RENUNCIA, separada del (57). El INPI las escribe juntas con `///` en el
+  // medio, pero dicen cosas opuestas: `productos` es lo que la marca ampara,
+  // `renuncia` es el término que el titular NO puede reivindicar en exclusiva.
+  // Mezcladas, el cotejo por afinidad compara contra palabras que justamente
+  // no están monopolizadas, y la renuncia se pierde de vista en el momento en
+  // que hay que citarla. NULL = esta marca no tiene renuncia.
+  renuncia        String?
+
+  // Cuándo se revisó el (57) contra el INPI con el tope de campo corregido.
+  // La primera pasada truncaba todo campo a 800 caracteres y le cortó la lista
+  // de productos a 72 marcas. NULL = todavía no se revisó.
+  productosRevisadoEn DateTime?
+
   // Titular
   //
   // ⚠️ NULLABLE por la misma razón, y con una de más: el CUIT del titular no
@@ -272,6 +285,12 @@ model Marca {
   logoBase64      String?     // la imagen tal cual vino, sin el prefijo data:
   logoFormato     String?     // jpg, png…
   huellaVisual    String?     // dHash de 64 bits en hexadecimal
+  // ⚠️ La huella de la MISMA imagen con los colores invertidos. No es un extra:
+  //    invertir es el disimulo que dHash no ve —la distancia salta cerca de 64,
+  //    o sea que lo lee como una imagen sin relación— y complementar los bits
+  //    del hash tampoco sirve: medido sobre un logo real dio 45, no 64. Sin
+  //    esta columna se guarda media huella.
+  huellaNegativa  String?
   huellaProporcion Float?     // ancho/alto, para descartar comparaciones absurdas
 
   // ⚠️ Heredado del export de Damlong, que exige cargar las mixtas y
@@ -399,6 +418,7 @@ model BoletinEntrada {
   logoBase64      String?
   logoFormato     String?
   huellaVisual    String?
+  huellaNegativa  String?
   huellaProporcion Float?
   fichaActualizadaEn DateTime?
 
