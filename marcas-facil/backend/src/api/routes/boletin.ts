@@ -1404,9 +1404,18 @@ function indiceEtiqueta(TRAMO: string, et: string, etiquetas: string[], desde = 
 // de la página. La primera versión lo puso en 800, y eso cortó el (57) de 72
 // marcas de la cartera —el (57) es el ALCANCE DE LA PROTECCIÓN, así que
 // truncarlo es perder la parte del registro que dice qué ampara la marca—.
-// 20.000 deja pasar cualquier lista real de productos y sigue frenando una
-// corrida de página entera.
-const TOPE_CAMPO = 20_000;
+//
+// 20.000 tampoco alcanzó. JUNGLE DENIM (acta 3872945) volvió justo en ese
+// número, y la cola mostró diez términos del nomenclador en orden alfabético
+// terminando en POLAINAS: no es un campo corrido, es una marca que enumera la
+// clase 25 entera término por término y a los 20.000 caracteres todavía va por
+// la P. El texto completo ronda los 31.000.
+//
+// De ahí 60.000: holgado para el caso extremo conocido, y la red de verdad no
+// es el número sino el informe `enElTope`, que muestra cualquier campo que
+// vuelva pegado al límite junto con su cola, para distinguir una lista larga
+// de verdad de una etiqueta faltante.
+const TOPE_CAMPO = 60_000;
 
 /** Lo que sigue a una etiqueta dentro de un tramo, hasta que empieza otra. */
 function campoDe(tramo: string, etiqueta: string, etiquetas = ETIQUETAS_FICHA): string {
@@ -2088,12 +2097,13 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
         fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: 'la ficha volvió sin (57)' });
         continue;
       }
-      if (crudo && crudo.length >= TOPE_CAMPO) {
+      const enElLimite = !!crudo && crudo.length >= TOPE_CAMPO;
+      if (enElLimite) {
         enElTope.push({
           acta: m.acta,
           denominacion: m.denominacion,
-          largo: crudo.length,
-          cola: crudo.slice(-300),
+          largo: crudo!.length,
+          cola: crudo!.slice(-300),
         });
       }
       if (otros.length) otrosTramos.push({ acta: m.acta, denominacion: m.denominacion, otros });
@@ -2101,7 +2111,16 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
       if (guardar) {
         await prisma.marca.update({
           where: { id: m.id },
-          data: { productos, renuncia: renuncia ?? null, productosRevisadoEn: new Date() },
+          data: {
+            productos,
+            renuncia: renuncia ?? null,
+            // Si volvió pegada al tope, sigue cortada: se guarda lo que hay
+            // —más que antes— pero NO se marca como revisada. Queda en la cola
+            // y vuelve a salir en cada corrida hasta que el texto entre entero.
+            // Marcarla sería darla por buena y perderla de vista, que es
+            // exactamente como se nos escaparon las 72 del corte de 800.
+            productosRevisadoEn: enElLimite ? undefined : new Date(),
+          },
         });
       }
 
