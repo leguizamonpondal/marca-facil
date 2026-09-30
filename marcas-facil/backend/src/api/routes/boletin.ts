@@ -1399,6 +1399,15 @@ function indiceEtiqueta(TRAMO: string, et: string, etiquetas: string[], desde = 
   }
 }
 
+// Tope de seguridad por campo. NO es un límite de longitud: es una red por si
+// falta una etiqueta en la lista de arriba y un campo se corre hasta el final
+// de la página. La primera versión lo puso en 800, y eso cortó el (57) de 72
+// marcas de la cartera —el (57) es el ALCANCE DE LA PROTECCIÓN, así que
+// truncarlo es perder la parte del registro que dice qué ampara la marca—.
+// 20.000 deja pasar cualquier lista real de productos y sigue frenando una
+// corrida de página entera.
+const TOPE_CAMPO = 20_000;
+
 /** Lo que sigue a una etiqueta dentro de un tramo, hasta que empieza otra. */
 function campoDe(tramo: string, etiqueta: string, etiquetas = ETIQUETAS_FICHA): string {
   const TRAMO = sinTildes(tramo);
@@ -1412,7 +1421,30 @@ function campoDe(tramo: string, etiqueta: string, etiquetas = ETIQUETAS_FICHA): 
     const j = indiceEtiqueta(TRAMO, otra, etiquetas, desde);
     if (j >= 0 && j < fin) fin = j;
   }
-  return tramo.slice(desde, fin).replace(/^[\s:·`-]+|[\s:·`-]+$/g, '').trim().slice(0, 800);
+  return tramo.slice(desde, fin).replace(/^[\s:·`-]+|[\s:·`-]+$/g, '').trim().slice(0, TOPE_CAMPO);
+}
+
+/**
+ * Separa la RENUNCIA de los productos. El INPI las escribe juntas en el (57),
+ * con `///` en el medio.
+ *
+ * No es prolijidad: la renuncia dice qué término el titular NO puede
+ * reivindicar en exclusiva. Mezclada adentro de `productos` ensucia el cotejo
+ * por afinidad —se compara contra palabras que justamente no están
+ * monopolizadas— y se pierde de vista en el momento en que hay que citarla.
+ *
+ * Si hay más de un `///`, corta en el primero y el resto queda en la renuncia.
+ */
+export function partirRenuncia(
+  texto: string | null | undefined,
+): { productos: string | null; renuncia: string | null } {
+  if (!texto) return { productos: null, renuncia: null };
+  const i = texto.indexOf('///');
+  if (i < 0) return { productos: texto.trim() || null, renuncia: null };
+  return {
+    productos: texto.slice(0, i).trim() || null,
+    renuncia: texto.slice(i + 3).trim() || null,
+  };
 }
 
 export interface TitularINPI {
@@ -1714,21 +1746,33 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
 
       // El dibujo. La huella se calcula acá y no después: si la imagen no se
       // puede leer, conviene saberlo ahora y no cuando haga falta cotejar.
-      let huella: { hash: string; proporcion: number } | null = null;
+      // ⚠️ `hashNegativo` NO es opcional. Es la huella de la MISMA imagen con
+      //    los colores invertidos, y es lo único que detecta ese disimulo:
+      //    invertir un logo hace saltar la distancia cerca de 64, o sea que
+      //    dHash lo ve como una imagen sin relación. Complementar los bits
+      //    tampoco sirve —medido sobre un logo real dio 45, no 64—.
+      //
+      //    La primera versión de esta ruta lo calculaba y lo tiraba, porque no
+      //    había columna donde ponerlo. Guardar sólo `hash` es guardar media
+      //    huella, y lo que se pierde es justo el caso que esa función existe
+      //    para atrapar.
+      let huella: { hash: string; hashNegativo: string; proporcion: number } | null = null;
       let bytesLogo = 0;
       if (ficha.logo) {
         const buf = Buffer.from(ficha.logo.base64, 'base64');
         bytesLogo = buf.length;
         try {
           const h = await calcularHuella(buf);
-          huella = { hash: h.hash, proporcion: h.proporcion };
+          huella = { hash: h.hash, hashNegativo: h.hashNegativo, proporcion: h.proporcion };
         } catch { /* imagen ilegible: se guarda igual, sin huella */ }
       }
 
       // El (57). «Toda la clase» es el dato oficial del INPI, no un relleno
       // nuestro: dice que la marca ampara la clase entera. Distinto de copiarle
       // el encabezado de Niza, que sería inventarle un alcance.
-      const productos = ficha.limitacion || ficha.proteccion || null;
+      const { productos, renuncia } = partirRenuncia(
+        ficha.limitacion || ficha.proteccion || null,
+      );
 
       // Los paréntesis de Damlong pasan a su campo. La denominación NO se
       // toca: separarla es una decisión aparte.
@@ -1764,9 +1808,12 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
               logoBase64: ficha.logo?.base64 ?? null,
               logoFormato: ficha.logo?.formato ?? null,
               huellaVisual: huella?.hash ?? null,
+              huellaNegativa: huella?.hashNegativo ?? null,
               huellaProporcion: huella?.proporcion ?? null,
               elementoFigurativo: elementoFigurativo || null,
               productos: productos ?? undefined,
+              renuncia: renuncia ?? undefined,
+              productosRevisadoEn: new Date(),
               titularCuit: titularPrincipal?.cuit || undefined,
               resolucion: ficha.resolucion.numero || undefined,
               resolucionTipo: ficha.resolucion.tipo || null,
@@ -1814,6 +1861,7 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
         titulares: ficha.titulares.map((t) => `${t.nombre}${t.porcentaje ? ` ${t.porcentaje}%` : ''}`),
         cuitPrincipal: titularPrincipal?.cuit || null,
         productos: productos ? productos.slice(0, 120) : null,
+        renuncia: renuncia || null,
         resolucion: ficha.resolucion.numero || null,
         vence: ficha.resolucion.vence || null,
         elementoFigurativo: elementoFigurativo || null,
@@ -1859,6 +1907,228 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
     },
     fallidas,
     procesadas,
+  });
+});
+
+
+// ── GET /api/boletin/cartera/huellas-negativas ───────────────────────────────
+//
+// Completa la huella del NEGATIVO en las marcas que ya tienen logo guardado.
+//
+// Por qué hace falta una pasada aparte: la primera versión de
+// `/cartera/enriquecer` calculaba `hashNegativo` y lo descartaba, porque no
+// existía la columna. Guardar sólo `hash` es guardar media huella — invertir
+// los colores de un logo hace saltar la distancia de dHash cerca de 64, o sea
+// que el sistema lo ve como una imagen sin relación, que es exactamente el
+// disimulo que esa función existe para atrapar.
+//
+// NO vuelve a consultar al INPI. La imagen quedó guardada en `logoBase64`, así
+// que la huella se recalcula leyendo la base. Eso ahorra las 838 consultas de
+// vuelta, y es la razón por la que se guardó la imagen y no sólo el código:
+// una clasificación que no se puede rehacer no se puede corregir.
+//
+// Resumible por construcción: toma las que tienen logo y no tienen todavía la
+// huella negativa.
+//
+//   ?limite=200   cuántas por llamada (por defecto 100; máximo 500)
+//   &guardar=1    escribe. Sin esto, sólo informa.
+router.get('/cartera/huellas-negativas', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const limite = Math.min(Math.max(parseInt(String(req.query.limite || '100')) || 100, 1), 500);
+  const guardar = String(req.query.guardar || '') === '1';
+
+  const pendientes = await prisma.marca.findMany({
+    where: { logoBase64: { not: null }, huellaNegativa: null },
+    select: { id: true, acta: true, denominacion: true, logoBase64: true, huellaVisual: true },
+    take: limite,
+  });
+
+  const quedanAntes = await prisma.marca.count({
+    where: { logoBase64: { not: null }, huellaNegativa: null },
+  });
+
+  const hechas: any[] = [];
+  const fallidas: any[] = [];
+  // Cuando la huella recalculada no coincide con la guardada, algo cambió
+  // entre una corrida y otra —la imagen, la librería, el muestreo— y eso
+  // invalidaría comparaciones hechas antes. Se verifica en vez de suponer.
+  const discordantes: any[] = [];
+
+  for (const m of pendientes) {
+    try {
+      const h = await calcularHuella(Buffer.from(m.logoBase64!, 'base64'));
+
+      if (m.huellaVisual && m.huellaVisual !== h.hash) {
+        discordantes.push({
+          acta: m.acta,
+          denominacion: m.denominacion,
+          guardada: m.huellaVisual,
+          recalculada: h.hash,
+        });
+      }
+
+      if (guardar) {
+        await prisma.marca.update({
+          where: { id: m.id },
+          data: { huellaNegativa: h.hashNegativo, huellaVisual: h.hash, huellaProporcion: h.proporcion },
+        });
+      }
+
+      hechas.push({ acta: m.acta, denominacion: m.denominacion, negativa: h.hashNegativo });
+    } catch (err: any) {
+      fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: err.message });
+    }
+  }
+
+  return res.json({
+    modo: guardar ? '💾 GUARDANDO' : '👁️ SECO — no se escribió nada. Agregá &guardar=1 para escribir.',
+    quedabanAntes: quedanAntes,
+    procesadasAhora: hechas.length,
+    quedanDespues: guardar ? quedanAntes - hechas.length : quedanAntes,
+    fallidas,
+    verificacion: {
+      nota:
+        'Huellas cuya recalculación no coincide con la guardada. Si hay alguna, las ' +
+        'comparaciones hechas antes no son reproducibles y hay que entender por qué.',
+      cantidad: discordantes.length,
+      casos: discordantes.slice(0, 20),
+    },
+    hechas: hechas.slice(0, 40),
+  });
+});
+
+// ── GET /api/boletin/cartera/productos-completos ─────────────────────────────
+//
+// Repara el (57) de las marcas a las que la primera pasada se lo cortó, y
+// separa la renuncia.
+//
+// QUÉ SE ROMPIÓ: `campoDe` truncaba TODO campo de la ficha a 800 caracteres.
+// En los campos cortos no se nota; en el (57) sí, y el (57) es el ALCANCE DE
+// LA PROTECCIÓN. 72 marcas de la cartera quedaron con la lista de productos
+// cortada a la mitad de una palabra. Una marca con el (57) incompleto no se
+// puede cotejar bien por afinidad de productos ni se puede invocar entera en
+// una oposición. El tope ahora es 20.000 y quedó como red, no como límite.
+//
+// DOS FASES, y la segunda no toca el INPI:
+//
+//   1. Las cortadas (`length(productos) = 800`) se vuelven a pedir al portal.
+//      Resumible por construcción, igual que la pasada grande: lleva
+//      `productosRevisadoEn`, y cada llamada toma las que lo tienen en NULL.
+//   2. Las que ya están completas pero tienen la renuncia pegada adentro se
+//      parten acá mismo, leyendo la base. No hace falta volver al INPI para
+//      cortar por `///` un texto que ya tenemos.
+//
+// La fase 2 se saltea a propósito las que siguen marcadas como cortadas: no
+// tiene sentido partir un texto que todavía está incompleto.
+//
+//   ?limite=10    cuántas re-consultar por llamada (por defecto 10; máximo 50)
+//   &guardar=1    escribe. Sin esto, sólo informa.
+router.get('/cartera/productos-completos', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const limite = Math.min(Math.max(parseInt(String(req.query.limite || '10')) || 10, 1), 50);
+  const guardar = String(req.query.guardar || '') === '1';
+
+  // ── Fase 1 · las cortadas, contra el INPI ──────────────────────────────────
+  const VALIDA = `acta ~ '^[0-9]{6,}$'`;
+  const CORTADAS = `length(productos) = 800 AND "productosRevisadoEn" IS NULL AND ${VALIDA}`;
+
+  const quedabanAntes = Number(
+    ((await prisma.$queryRawUnsafe(
+      `SELECT count(*)::int AS n FROM marcas WHERE ${CORTADAS}`,
+    )) as { n: number }[])[0]?.n ?? 0,
+  );
+
+  const filas = (await prisma.$queryRawUnsafe(
+    `SELECT id, acta, denominacion, productos FROM marcas WHERE ${CORTADAS} ORDER BY acta ASC LIMIT $1`,
+    limite,
+  )) as { id: string; acta: string; denominacion: string; productos: string }[];
+
+  const reparadas: any[] = [];
+  const fallidas: any[] = [];
+  // Si el texto completo vuelve a medir exactamente 800, no lo habíamos
+  // cortado: medía eso. Se informa en vez de dejarlo dando vueltas en la cola.
+  const seguianEn800: any[] = [];
+
+  for (const m of filas) {
+    try {
+      const ficha = parsearFichaINPI(await pedirFichaINPI(m.acta));
+      const { productos, renuncia } = partirRenuncia(
+        ficha.limitacion || ficha.proteccion || null,
+      );
+
+      if (!productos) {
+        fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: 'la ficha volvió sin (57)' });
+        continue;
+      }
+      if (productos.length === 800 && !renuncia) seguianEn800.push({ acta: m.acta, denominacion: m.denominacion });
+
+      if (guardar) {
+        await prisma.marca.update({
+          where: { id: m.id },
+          data: { productos, renuncia: renuncia ?? null, productosRevisadoEn: new Date() },
+        });
+      }
+
+      reparadas.push({
+        acta: m.acta,
+        denominacion: m.denominacion,
+        antes: m.productos.length,
+        despues: productos.length,
+        gano: productos.length - m.productos.length,
+        renuncia: renuncia ? renuncia.slice(0, 160) : null,
+      });
+    } catch (err: any) {
+      fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: err.message });
+    }
+
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  // ── Fase 2 · la renuncia, sin salir de la base ─────────────────────────────
+  const PARTIBLES = `productos LIKE '%///%' AND renuncia IS NULL AND length(productos) <> 800`;
+
+  const pendientesDePartir = (await prisma.$queryRawUnsafe(
+    `SELECT id, acta, denominacion, productos FROM marcas WHERE ${PARTIBLES} ORDER BY acta ASC`,
+  )) as { id: string; acta: string; denominacion: string; productos: string }[];
+
+  const partidas: any[] = [];
+  for (const m of pendientesDePartir) {
+    const { productos, renuncia } = partirRenuncia(m.productos);
+    if (!renuncia) continue;
+    if (guardar) {
+      await prisma.marca.update({
+        where: { id: m.id },
+        data: { productos: productos ?? undefined, renuncia },
+      });
+    }
+    partidas.push({ acta: m.acta, denominacion: m.denominacion, renuncia: renuncia.slice(0, 160) });
+  }
+
+  return res.json({
+    modo: guardar ? '💾 GUARDANDO' : '👁️ SECO — no se escribió nada. Agregá &guardar=1 para escribir.',
+    fase1_cortadas: {
+      nota: 'El (57) que la primera pasada truncó a 800 caracteres. Se vuelve a pedir al INPI.',
+      quedabanAntes,
+      reparadasAhora: reparadas.length,
+      quedanDespues: guardar ? quedabanAntes - reparadas.length : quedabanAntes,
+      caracteresRecuperados: reparadas.reduce((a, r) => a + r.gano, 0),
+      fallidas,
+      seguianEn800: {
+        nota: 'Medían 800 de verdad; no las habíamos cortado.',
+        cantidad: seguianEn800.length,
+        casos: seguianEn800,
+      },
+      reparadas: reparadas.slice(0, 30),
+    },
+    fase2_renuncia: {
+      nota:
+        'La renuncia dice qué término el titular NO puede reivindicar en exclusiva. ' +
+        'Separada de `productos` para que no ensucie el cotejo por afinidad.',
+      separadasAhora: partidas.length,
+      casos: partidas.slice(0, 30),
+    },
   });
 });
 
