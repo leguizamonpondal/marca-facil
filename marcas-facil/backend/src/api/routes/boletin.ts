@@ -1541,35 +1541,108 @@ function esNotaDeTramite(tramo: string): boolean {
  * distinta —productos, renuncia, anotaciones de trámite—. Por eso se clasifica
  * por contenido y nunca por posición.
  */
-export function alcanceDeLaFicha(ficha: { proteccion: string; limitacion: string }): {
-  productos: string | null;
+export type AlcanceTipo =
+  | 'TODA_LA_CLASE'
+  | 'LISTA'
+  | 'TODA_LA_CLASE_EXCEPTO'
+  | 'DESCONOCIDO';
+
+export interface Alcance {
+  tipo: AlcanceTipo;
+  productos: string | null;   // qué ampara, cuando es una lista
+  excluidos: string | null;   // qué queda AFUERA, cuando la protección dice «Excepto»
   renuncia: string | null;
-  fuente: 'LIMITACION' | 'PROTECCION' | null;
   notas: string[];
   sinClasificar: string[];
-} {
+  fuente: 'LIMITACION' | 'PROTECCION' | null;
+}
+
+/** La protección dice «Excepto»: la limitación es una EXCLUSIÓN, no una cobertura. */
+const PROTEGE_EXCEPTO = (p: string) => /^EXCEPTO\b/.test(sinTildes(p).trim());
+
+/** La protección dice que ampara la clase entera. */
+const PROTEGE_TODA_LA_CLASE = (p: string) => /\bTODA LA CLASE\b/.test(sinTildes(p));
+
+/**
+ * El alcance real de la marca, leyendo PROTECCIÓN y LIMITACIÓN juntas.
+ *
+ * ⚠️ EL SENTIDO DE LA LIMITACIÓN DEPENDE DE LA PROTECCIÓN. Leer una sin la otra
+ * da vuelta el resultado. Caso verificado contra el expediente del acta 3572925
+ * (CUADRICULADA, clase 21, GRUPO AYUDIN):
+ *
+ *     PROTECCION:  Excepto
+ *     LIMITACION:  MANGOS DE ESCOBA … ACEITERAS DE METALES PRECIOSOS … CUBRETETERAS
+ *
+ * Esa marca protege toda la clase 21 EXCEPTO esos productos. La lista no es lo
+ * que ampara: es lo que queda afuera. Guardarla en `productos` como si fuera la
+ * cobertura **invierte el cotejo por afinidad** — el motor compararía contra
+ * exactamente los productos que la marca no cubre, dando por confundible lo que
+ * no lo es y dejando pasar lo que sí.
+ *
+ * Hoy ya no es la forma común de limitar —se enumeran los productos que se
+ * requieren de cada clase— pero excepcionalmente se admite una exclusión, y las
+ * actas viejas la usan.
+ *
+ * | PROTECCIÓN        | LIMITACIÓN          | alcance                        |
+ * |-------------------|---------------------|--------------------------------|
+ * | `Toda la clase`   | vacía               | TODA_LA_CLASE                  |
+ * | `Toda la clase`   | lista de productos  | LISTA — sólo esa lista         |
+ * | **`Excepto`**     | lista de productos  | TODA_LA_CLASE_EXCEPTO          |
+ * | lista             | vacía               | LISTA — la de la protección    |
+ * | cualquiera        | nota de trámite     | manda la PROTECCIÓN            |
+ *
+ * Y `///` no separa «productos y renuncia»: separa tramos de naturaleza distinta
+ * —productos, renuncia, anotaciones de expediente—, así que se clasifica por
+ * contenido y nunca por posición.
+ */
+export function alcanceDeLaFicha(ficha: { proteccion: string; limitacion: string }): Alcance {
   const { productos: limProductos, renuncia, otros } = partirRenuncia(ficha.limitacion);
 
   const notas = otros.filter(esNotaDeTramite);
   const sinClasificar = otros.filter((o) => !esNotaDeTramite(o));
 
-  let productosDeLimitacion: string | null = null;
+  // El primer tramo de la limitación: ¿productos de verdad, o una nota?
+  let listaDeLimitacion: string | null = null;
   if (limProductos) {
     if (esNotaDeTramite(limProductos)) notas.unshift(limProductos);
-    else productosDeLimitacion = limProductos;
-  }
-
-  if (productosDeLimitacion) {
-    return { productos: productosDeLimitacion, renuncia, fuente: 'LIMITACION', notas, sinClasificar };
+    else listaDeLimitacion = limProductos;
   }
 
   const proteccion = (ficha.proteccion || '').trim();
+  const base: Omit<Alcance, 'tipo' | 'productos' | 'excluidos' | 'fuente'> = {
+    renuncia, notas, sinClasificar,
+  };
+
+  // ── La protección dice «Excepto»: la lista es lo que queda AFUERA ──────────
+  if (PROTEGE_EXCEPTO(proteccion)) {
+    if (listaDeLimitacion) {
+      return {
+        ...base, tipo: 'TODA_LA_CLASE_EXCEPTO',
+        productos: null, excluidos: listaDeLimitacion, fuente: 'LIMITACION',
+      };
+    }
+    // «Excepto» sin lista no dice nada: no se adivina.
+    return { ...base, tipo: 'DESCONOCIDO', productos: null, excluidos: null, fuente: null };
+  }
+
+  // ── Limitación con productos: ésa es la cobertura ──────────────────────────
+  if (listaDeLimitacion) {
+    return {
+      ...base, tipo: 'LISTA',
+      productos: listaDeLimitacion, excluidos: null, fuente: 'LIMITACION',
+    };
+  }
+
+  // ── Sin limitación útil: manda la protección ───────────────────────────────
+  if (!proteccion) {
+    return { ...base, tipo: 'DESCONOCIDO', productos: null, excluidos: null, fuente: null };
+  }
   return {
-    productos: proteccion || null,
-    renuncia,
-    fuente: proteccion ? 'PROTECCION' : null,
-    notas,
-    sinClasificar,
+    ...base,
+    tipo: PROTEGE_TODA_LA_CLASE(proteccion) ? 'TODA_LA_CLASE' : 'LISTA',
+    productos: proteccion,
+    excluidos: null,
+    fuente: 'PROTECCION',
   };
 }
 
@@ -2325,6 +2398,155 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
       enFase1: otrosTramos,
       enFase2: sinRenunciaReal,
     },
+  });
+});
+
+
+// ── GET /api/boletin/cartera/alcance ─────────────────────────────────────────
+//
+// Vuelve a leer PROTECCIÓN y LIMITACIÓN de las 838 fichas y guarda las dos
+// CRUDAS, más el alcance resuelto.
+//
+// POR QUÉ HACE FALTA VOLVER AL INPI: la pasada anterior guardó sólo el valor
+// derivado (`productos`) y descartó los dos campos de origen. Por eso hoy no se
+// puede saber desde la base cuántas marcas tienen PROTECCIÓN «Excepto» — la
+// distinción se perdió. Es exactamente la regla que ya habíamos escrito al
+// decidir guardar `logoBase64` y no sólo la huella: una clasificación que no se
+// puede rehacer no se puede corregir. La violamos con el (57) y se paga con una
+// pasada entera.
+//
+// QUÉ CAMBIA: donde la protección dice «Excepto», la lista de la limitación NO
+// es la cobertura sino lo que queda AFUERA. Guardarla en `productos` invierte el
+// cotejo por afinidad. Esas marcas pasan a `excluidos` con
+// `alcanceTipo = TODA_LA_CLASE_EXCEPTO`, y `productos` queda en NULL a
+// propósito: el tipo es el que dice cómo leer la fila.
+//
+// Resumible por construcción: pendientes son las que tienen `alcanceTipo` en
+// NULL. `DESCONOCIDO` también cuenta como resuelto —sabemos que no sabemos— así
+// que no vuelven a la cola.
+//
+//   ?limite=10    cuántas por llamada (por defecto 10; máximo 50)
+//   ?actas=...    fuerza marcas puntuales, sin importar su estado
+//   &guardar=1    escribe. Sin esto, sólo informa.
+router.get('/cartera/alcance', async (req, res: Response) => {
+  if (!exigirToken(req, res)) return;
+
+  const limite = Math.min(Math.max(parseInt(String(req.query.limite || '10')) || 10, 1), 50);
+  const guardar = String(req.query.guardar || '') === '1';
+
+  const actasPedidas = String(req.query.actas || '')
+    .split(',')
+    .map((a) => a.replace(/\D/g, ''))
+    .filter((a) => a.length >= 6);
+
+  const PENDIENTES = actasPedidas.length
+    ? `acta IN (${actasPedidas.map((a) => `'${a}'`).join(',')})`
+    : `"alcanceTipo" IS NULL AND acta ~ '^[0-9]{6,}$'`;
+
+  const quedabanAntes = Number(
+    ((await prisma.$queryRawUnsafe(
+      `SELECT count(*)::int AS n FROM marcas WHERE ${PENDIENTES}`,
+    )) as { n: number }[])[0]?.n ?? 0,
+  );
+
+  const filas = (await prisma.$queryRawUnsafe(
+    `SELECT id, acta, denominacion, productos FROM marcas WHERE ${PENDIENTES} ORDER BY acta ASC LIMIT $1`,
+    limite,
+  )) as { id: string; acta: string; denominacion: string; productos: string | null }[];
+
+  const porTipo: Record<string, number> = {};
+  const hechas: any[] = [];
+  const fallidas: any[] = [];
+  // Lo que más importa de esta pasada: las marcas cuyo cotejo estaba invertido.
+  const invertidas: any[] = [];
+  // Y las que cambian de contenido, para poder mirarlas antes de confiar.
+  const cambiaronProductos: any[] = [];
+  const desconocidas: any[] = [];
+
+  for (const m of filas) {
+    try {
+      const ficha = parsearFichaINPI(await pedirFichaINPI(m.acta));
+      const a = alcanceDeLaFicha(ficha);
+      porTipo[a.tipo] = (porTipo[a.tipo] || 0) + 1;
+
+      if (a.tipo === 'TODA_LA_CLASE_EXCEPTO') {
+        invertidas.push({
+          acta: m.acta,
+          denominacion: m.denominacion,
+          seGuardabaComoCobertura: (m.productos || '').slice(0, 140),
+          esEnRealidadExclusion: (a.excluidos || '').slice(0, 140),
+        });
+      } else if (a.tipo === 'DESCONOCIDO') {
+        desconocidas.push({
+          acta: m.acta, denominacion: m.denominacion,
+          proteccion: ficha.proteccion, limitacion: ficha.limitacion.slice(0, 140),
+        });
+      } else if ((m.productos || '') !== (a.productos || '')) {
+        cambiaronProductos.push({
+          acta: m.acta, denominacion: m.denominacion,
+          antes: (m.productos || '').slice(0, 100),
+          ahora: (a.productos || '').slice(0, 100),
+        });
+      }
+
+      if (guardar) {
+        await prisma.marca.update({
+          where: { id: m.id },
+          data: {
+            proteccionCruda: ficha.proteccion || null,
+            limitacionCruda: ficha.limitacion || null,
+            alcanceTipo: a.tipo,
+            productos: a.productos,
+            excluidos: a.excluidos,
+            renuncia: a.renuncia,
+            notaTramite: a.notas.length ? a.notas.join(' /// ') : null,
+          },
+        });
+      }
+
+      hechas.push({
+        acta: m.acta, denominacion: m.denominacion, tipo: a.tipo, fuente: a.fuente,
+        proteccion: ficha.proteccion,
+        largoProductos: a.productos?.length ?? 0,
+        largoExcluidos: a.excluidos?.length ?? 0,
+        nota: a.notas.length ? a.notas[0].slice(0, 90) : null,
+      });
+    } catch (err: any) {
+      fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: err.message });
+    }
+
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  return res.json({
+    modo: guardar ? '💾 GUARDANDO' : '👁️ SECO — no se escribió nada. Agregá &guardar=1 para escribir.',
+    quedabanAntes,
+    procesadasAhora: hechas.length,
+    quedanDespues: guardar ? quedabanAntes - hechas.length : quedabanAntes,
+    porTipo,
+    fallidas,
+    cotejoInvertido: {
+      nota:
+        '⚠️ La protección dice «Excepto»: lo que estaba guardado como cobertura es en ' +
+        'realidad lo que la marca NO cubre. Estas filas tenían el cotejo por afinidad dado ' +
+        'vuelta. Ahora van a `excluidos`, y `productos` queda NULL con alcanceTipo = ' +
+        'TODA_LA_CLASE_EXCEPTO.',
+      cantidad: invertidas.length,
+      casos: invertidas,
+    },
+    sinResolver: {
+      nota:
+        'No se pudo determinar el alcance. Se marcan DESCONOCIDO —sabemos que no sabemos— ' +
+        'para que no vuelvan a la cola y queden a la vista.',
+      cantidad: desconocidas.length,
+      casos: desconocidas,
+    },
+    cambiaronProductos: {
+      nota: 'Mismo tipo de alcance, pero el texto guardado no coincide con el de la ficha.',
+      cantidad: cambiaronProductos.length,
+      casos: cambiaronProductos.slice(0, 20),
+    },
+    hechas: hechas.slice(0, 30),
   });
 });
 
