@@ -234,6 +234,34 @@ model Marca {
   // que hay que citarla. NULL = esta marca no tiene renuncia.
   renuncia        String?
 
+  // ⚠️ Los DOS campos de la ficha, crudos. El sentido de la limitación DEPENDE
+  //    de la protección: si la protección dice «Excepto», la limitación es lo
+  //    que la marca NO cubre. Guardar sólo el valor derivado hizo imposible
+  //    saber cuántas marcas estaban en ese caso, y obligó a una pasada entera
+  //    contra el INPI para recuperarlo. Una clasificación que no se puede
+  //    rehacer no se puede corregir: por eso ahora se guarda el origen.
+  proteccionCruda String?
+  limitacionCruda String?
+
+  // Cómo hay que leer esta fila:
+  //   TODA_LA_CLASE          → ampara la clase entera
+  //   LISTA                  → ampara lo que dice `productos`
+  //   TODA_LA_CLASE_EXCEPTO  → ampara la clase MENOS lo que dice `excluidos`
+  //   DESCONOCIDO            → no se pudo determinar; sabemos que no sabemos
+  // NULL = todavía no se resolvió. Es lo que distingue «no lo sabemos» de
+  // «productos está vacío porque el alcance se expresa por exclusión».
+  alcanceTipo     String?
+
+  // Lo que queda AFUERA cuando la protección dice «Excepto». NUNCA se compara
+  // como si fuera cobertura: es un filtro negativo.
+  excluidos       String?
+
+  // Anotaciones de expediente que vienen en la LIMITACIÓN y no limitan nada
+  // —típicamente una republicación ordenada por disposición—. Importan para el
+  // cómputo del plazo: corre desde la publicación válida, y una oposición ya
+  // presentada contra la anulada sigue vigente para la nueva.
+  notaTramite     String?
+
   // Cuándo se revisó el (57) contra el INPI con el tope de campo corregido.
   // La primera pasada truncaba todo campo a 800 caracteres y le cortó la lista
   // de productos a 72 marcas. NULL = todavía no se revisó.
