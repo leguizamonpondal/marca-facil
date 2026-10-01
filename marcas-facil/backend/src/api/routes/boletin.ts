@@ -1365,12 +1365,39 @@ const sinTildes = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toUp
 // campo llega hasta que empieza el siguiente: sin la lista completa, un campo
 // vacío se come el contenido del que le sigue. Así fue como en la primera
 // prueba la limitación —que estaba vacía— se tragó entera la titularidad.
-const ETIQUETAS_FICHA = [
+// ⚠️ Las etiquetas van por SECCIÓN, no todas juntas.
+//
+// La primera versión usaba una sola lista para toda la ficha, y un campo
+// terminaba donde apareciera CUALQUIER etiqueta, en cualquier parte del texto.
+// Eso cortó listas de productos reales: `REVISTAS (PUBLICACIONES PERIODICAS)`
+// se partía en `REVISTAS (`, porque PUBLICACION es el encabezado de una sección
+// —que vive mucho más abajo en la ficha— y la palabra aparece adentro del
+// término del nomenclador. Nueve marcas de la cartera quedaron así, y las
+// clases 16 y 41 son las más expuestas porque «edición» y «publicación» son
+// vocabulario corriente ahí.
+//
+// La ficha tiene secciones en orden fijo, y un campo sólo puede terminar donde
+// empieza algo que REALMENTE puede seguirlo. Separando las listas, la palabra
+// PUBLICACION deja de existir como terminador en el tramo de los productos y
+// toda esta clase de error desaparece, no sólo los nueve casos que se pudieron
+// detectar mirando la base.
+
+/** DATOS GENERALES + TITULARIDAD, hasta el primer NOMBRE:. Acá vive el (57). */
+const ETIQUETAS_GENERALES = [
   'PRESENTACION:', 'DENOMINACION:', 'TIPO DE MARCA:', 'DOMICILO LEGAL:',
   'DOMICILIO LEGAL:', 'RENOVACION DE:', 'RENOVADA POR:', 'NRO DE EFECTOR:',
   'TITULARIDAD', 'CLASE:', 'PROTECCION:', 'LIMITACION:',
+].map(sinTildes);
+
+/** Datos de cada titular, dentro de su propio tramo. */
+const ETIQUETAS_TITULAR = [
   'NOMBRE:', 'TIPO DNI:', 'DNI:', 'GENERO:', 'PAIS:', 'CUIT:',
   'TERRITORIO LEGAL:', 'DOMICILIO REAL:', 'LOCALIDAD:', 'CP.',
+  'GESTION DEL TRAMITE',
+].map(sinTildes);
+
+/** Trámite, publicación, oposiciones y resolución: de NOMBRE: para abajo. */
+const ETIQUETAS_TRAMITE = [
   'GESTION DEL TRAMITE', 'AGENTE:', 'CARACTER:', 'REGLAMENTO DE USO',
   'PRIORIDADES', 'PUBLICACION', 'OPOSICIONES', 'OPONENTE',
   'VISTAS Y NOTIFICACIONES', 'CONTESTACION',
@@ -1378,6 +1405,11 @@ const ETIQUETAS_FICHA = [
   'NOTIFICACION:', 'BOLETIN:', 'OBSERVACION:', 'DISPOSICION:', 'VENCE:',
   'UBICACION DEL EXPEDIENTE', 'UBICACION ACTUAL:', 'DICTAMENES',
 ].map(sinTildes);
+
+/** Unión. Sólo como valor por defecto; cada llamada pasa su sección. */
+const ETIQUETAS_FICHA = [
+  ...ETIQUETAS_GENERALES, ...ETIQUETAS_TITULAR, ...ETIQUETAS_TRAMITE,
+];
 
 // Una etiqueta puede ser el final de otra: `DNI:` está dentro de `TIPO DNI:`.
 // Buscada a secas, `DNI:` cae sobre la de `TIPO DNI:` y el documento vuelve
@@ -1477,6 +1509,70 @@ export function partirRenuncia(texto: string | null | undefined): {
   };
 }
 
+/**
+ * Una NOTA DE TRÁMITE no limita productos: anota algo del expediente.
+ *
+ * El caso que lo destapó: acta 3493712, LIMITACION =
+ * «/// NUEVA PUBLICACIÓN, SEGÚN DISPOSICION NRO. M- 1471/08.» Eso dice que la
+ * primera publicación en el Boletín tuvo un problema, que se ordenó una
+ * segunda y que la primera quedó sin efecto. No recorta el alcance de la marca.
+ *
+ * El reconocimiento es DELIBERADAMENTE angosto: exige una referencia expresa a
+ * una disposición o a una publicación nueva o sin efecto. Buscar la palabra
+ * «publicación» a secas confundiría una limitación real a «publicaciones
+ * periódicas» con una nota de trámite, y recortarle el alcance a una marca por
+ * una palabra suelta es peor que no clasificar.
+ */
+function esNotaDeTramite(tramo: string): boolean {
+  return /(NUEVA PUBLICACION|SIN EFECTO|SEGUN DISPOSICION|DISPOSICION NRO|DISPOSICION NUMERO|DISPOSICION N\b)/
+    .test(sinTildes(tramo));
+}
+
+/**
+ * El alcance real de la marca, resolviendo LIMITACIÓN contra PROTECCIÓN.
+ *
+ * ⚠️ La versión anterior hacía `limitacion || proteccion`, y eso estaba mal: en
+ * el acta 3493712 la PROTECCIÓN decía «Toda la clase» y la LIMITACIÓN sólo
+ * traía una nota de trámite. Como la limitación no venía vacía, ganaba, y el
+ * alcance real de la marca se descartaba. Criterio del matriculado: lo que
+ * importa es la limitación REAL de productos; si no hay, vale la protección.
+ *
+ * Y `///` no separa «productos y renuncia»: separa tramos de naturaleza
+ * distinta —productos, renuncia, anotaciones de trámite—. Por eso se clasifica
+ * por contenido y nunca por posición.
+ */
+export function alcanceDeLaFicha(ficha: { proteccion: string; limitacion: string }): {
+  productos: string | null;
+  renuncia: string | null;
+  fuente: 'LIMITACION' | 'PROTECCION' | null;
+  notas: string[];
+  sinClasificar: string[];
+} {
+  const { productos: limProductos, renuncia, otros } = partirRenuncia(ficha.limitacion);
+
+  const notas = otros.filter(esNotaDeTramite);
+  const sinClasificar = otros.filter((o) => !esNotaDeTramite(o));
+
+  let productosDeLimitacion: string | null = null;
+  if (limProductos) {
+    if (esNotaDeTramite(limProductos)) notas.unshift(limProductos);
+    else productosDeLimitacion = limProductos;
+  }
+
+  if (productosDeLimitacion) {
+    return { productos: productosDeLimitacion, renuncia, fuente: 'LIMITACION', notas, sinClasificar };
+  }
+
+  const proteccion = (ficha.proteccion || '').trim();
+  return {
+    productos: proteccion || null,
+    renuncia,
+    fuente: proteccion ? 'PROTECCION' : null,
+    notas,
+    sinClasificar,
+  };
+}
+
 export interface TitularINPI {
   nombre: string; porcentaje: string; tipoDocumento: string; documento: string;
   genero: string; pais: string; cuit: string; domicilioReal: string;
@@ -1535,19 +1631,19 @@ export function parsearFichaINPI(html: string): FichaINPI {
     .map((t) => t.trim())
     .filter((t) => sinTildes(t).startsWith('NOMBRE:'))
     .map((t) => {
-      const crudo = campoDe(t, 'NOMBRE:');
+      const crudo = campoDe(t, 'NOMBRE:', ETIQUETAS_TITULAR);
       const m = crudo.match(/^(.*?)\s*(\d+[.,]\d+)\s*%\s*$/);
       return {
         nombre: (m ? m[1] : crudo).trim(),
         porcentaje: m ? m[2] : '',
-        tipoDocumento: campoDe(t, 'TIPO DNI:'),
-        documento: campoDe(t, 'DNI:'),
-        genero: campoDe(t, 'GENERO:'),
-        pais: campoDe(t, 'PAIS:'),
-        cuit: campoDe(t, 'CUIT:').replace(/\D/g, ''),
-        domicilioReal: campoDe(t, 'DOMICILIO REAL:'),
-        localidad: campoDe(t, 'LOCALIDAD:'),
-        codigoPostal: campoDe(t, 'CP.'),
+        tipoDocumento: campoDe(t, 'TIPO DNI:', ETIQUETAS_TITULAR),
+        documento: campoDe(t, 'DNI:', ETIQUETAS_TITULAR),
+        genero: campoDe(t, 'GENERO:', ETIQUETAS_TITULAR),
+        pais: campoDe(t, 'PAIS:', ETIQUETAS_TITULAR),
+        cuit: campoDe(t, 'CUIT:', ETIQUETAS_TITULAR).replace(/\D/g, ''),
+        domicilioReal: campoDe(t, 'DOMICILIO REAL:', ETIQUETAS_TITULAR),
+        localidad: campoDe(t, 'LOCALIDAD:', ETIQUETAS_TITULAR),
+        codigoPostal: campoDe(t, 'CP.', ETIQUETAS_TITULAR),
       };
     });
 
@@ -1556,34 +1652,36 @@ export function parsearFichaINPI(html: string): FichaINPI {
   const tramoGeneral = iNombre >= 0 ? plano.slice(0, iNombre) : plano;
 
   return {
-    presentacion: campoDe(tramoGeneral, 'PRESENTACION:'),
-    denominacion: campoDe(tramoGeneral, 'DENOMINACION:'),
-    tipoMarca: campoDe(tramoGeneral, 'TIPO DE MARCA:'),
-    domicilioLegal: campoDe(tramoGeneral, 'DOMICILO LEGAL:') || campoDe(tramoGeneral, 'DOMICILIO LEGAL:'),
-    renovacionDe: campoDe(tramoGeneral, 'RENOVACION DE:').replace(/\D/g, ''),
-    renovadaPor: campoDe(tramoGeneral, 'RENOVADA POR:').replace(/\D/g, ''),
-    clase: campoDe(tramoGeneral, 'CLASE:'),
-    proteccion: campoDe(tramoGeneral, 'PROTECCION:'),
-    limitacion: campoDe(tramoGeneral, 'LIMITACION:'),
+    presentacion: campoDe(tramoGeneral, 'PRESENTACION:', ETIQUETAS_GENERALES),
+    denominacion: campoDe(tramoGeneral, 'DENOMINACION:', ETIQUETAS_GENERALES),
+    tipoMarca: campoDe(tramoGeneral, 'TIPO DE MARCA:', ETIQUETAS_GENERALES),
+    domicilioLegal:
+      campoDe(tramoGeneral, 'DOMICILO LEGAL:', ETIQUETAS_GENERALES) ||
+      campoDe(tramoGeneral, 'DOMICILIO LEGAL:', ETIQUETAS_GENERALES),
+    renovacionDe: campoDe(tramoGeneral, 'RENOVACION DE:', ETIQUETAS_GENERALES).replace(/\D/g, ''),
+    renovadaPor: campoDe(tramoGeneral, 'RENOVADA POR:', ETIQUETAS_GENERALES).replace(/\D/g, ''),
+    clase: campoDe(tramoGeneral, 'CLASE:', ETIQUETAS_GENERALES),
+    proteccion: campoDe(tramoGeneral, 'PROTECCION:', ETIQUETAS_GENERALES),
+    limitacion: campoDe(tramoGeneral, 'LIMITACION:', ETIQUETAS_GENERALES),
     titulares,
     agente: {
-      numero: (campoDe(plano, 'AGENTE:').match(/^\s*(\d+)/) || ['', ''])[1],
-      nombre: campoDe(plano, 'AGENTE:').replace(/^\s*\d+\s*/, '').trim(),
-      caracter: campoDe(plano, 'CARACTER:'),
+      numero: (campoDe(plano, 'AGENTE:', ETIQUETAS_TRAMITE).match(/^\s*(\d+)/) || ['', ''])[1],
+      nombre: campoDe(plano, 'AGENTE:', ETIQUETAS_TRAMITE).replace(/^\s*\d+\s*/, '').trim(),
+      caracter: campoDe(plano, 'CARACTER:', ETIQUETAS_TRAMITE),
     },
     resolucion: {
-      estado: campoDe(plano, 'RESOLUCION:').replace(/[[\]]/g, '').trim(),
-      fechaProyecto: campoDe(plano, 'FEC DE PROY:'),
-      numero: campoDe(plano, 'NRO:').replace(/\D/g, ''),
-      tipo: campoDe(plano, 'TIPO:'),
-      motivo: campoDe(plano, 'MOTIVO:'),
-      notificacion: campoDe(plano, 'NOTIFICACION:'),
-      boletin: campoDe(plano, 'BOLETIN:').replace(/\D/g, ''),
-      observacion: campoDe(plano, 'OBSERVACION:'),
-      disposicion: campoDe(plano, 'DISPOSICION:'),
-      vence: campoDe(plano, 'VENCE:'),
+      estado: campoDe(plano, 'RESOLUCION:', ETIQUETAS_TRAMITE).replace(/[[\]]/g, '').trim(),
+      fechaProyecto: campoDe(plano, 'FEC DE PROY:', ETIQUETAS_TRAMITE),
+      numero: campoDe(plano, 'NRO:', ETIQUETAS_TRAMITE).replace(/\D/g, ''),
+      tipo: campoDe(plano, 'TIPO:', ETIQUETAS_TRAMITE),
+      motivo: campoDe(plano, 'MOTIVO:', ETIQUETAS_TRAMITE),
+      notificacion: campoDe(plano, 'NOTIFICACION:', ETIQUETAS_TRAMITE),
+      boletin: campoDe(plano, 'BOLETIN:', ETIQUETAS_TRAMITE).replace(/\D/g, ''),
+      observacion: campoDe(plano, 'OBSERVACION:', ETIQUETAS_TRAMITE),
+      disposicion: campoDe(plano, 'DISPOSICION:', ETIQUETAS_TRAMITE),
+      vence: campoDe(plano, 'VENCE:', ETIQUETAS_TRAMITE),
     },
-    ubicacionActual: campoDe(plano, 'UBICACION ACTUAL:'),
+    ubicacionActual: campoDe(plano, 'UBICACION ACTUAL:', ETIQUETAS_TRAMITE),
     logo: embebidas[0] || null,
   };
 }
@@ -1800,9 +1898,8 @@ router.get('/cartera/enriquecer', async (req, res: Response) => {
       // El (57). «Toda la clase» es el dato oficial del INPI, no un relleno
       // nuestro: dice que la marca ampara la clase entera. Distinto de copiarle
       // el encabezado de Niza, que sería inventarle un alcance.
-      const { productos, renuncia } = partirRenuncia(
-        ficha.limitacion || ficha.proteccion || null,
-      );
+      const alcance = alcanceDeLaFicha(ficha);
+      const { productos, renuncia } = alcance;
 
       // Los paréntesis de Damlong pasan a su campo. La denominación NO se
       // toca: separarla es una decisión aparte.
@@ -2061,8 +2158,20 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
   const guardar = String(req.query.guardar || '') === '1';
 
   // ── Fase 1 · las cortadas, contra el INPI ──────────────────────────────────
+  //
+  // `?actas=4031819,4035744` fuerza esas marcas sin importar en qué estado
+  // estén. Hace falta para los cortes que NO eran el límite de 800 sino una
+  // etiqueta adentro del texto: esas marcas ya figuran como revisadas y de otro
+  // modo no habría forma de volver a pedirlas.
+  const actasPedidas = String(req.query.actas || '')
+    .split(',')
+    .map((a) => a.replace(/\D/g, ''))   // sólo dígitos: no hay nada que inyectar
+    .filter((a) => a.length >= 6);
+
   const VALIDA = `acta ~ '^[0-9]{6,}$'`;
-  const CORTADAS = `length(productos) = 800 AND "productosRevisadoEn" IS NULL AND ${VALIDA}`;
+  const CORTADAS = actasPedidas.length
+    ? `acta IN (${actasPedidas.map((a) => `'${a}'`).join(',')})`
+    : `length(productos) = 800 AND "productosRevisadoEn" IS NULL AND ${VALIDA}`;
 
   const quedabanAntes = Number(
     ((await prisma.$queryRawUnsafe(
@@ -2078,6 +2187,7 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
   const reparadas: any[] = [];
   const fallidas: any[] = [];
   const otrosTramos: any[] = [];
+  const notasDeTramite: any[] = [];
   // Un campo que vuelve JUSTO en el tope no está completo: está cortado de
   // nuevo, ahora en 20.000. Puede ser un (57) enorme de verdad, o una etiqueta
   // que falta en ETIQUETAS_FICHA y hace que el campo se corra hasta el final
@@ -2090,8 +2200,10 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
   for (const m of filas) {
     try {
       const ficha = parsearFichaINPI(await pedirFichaINPI(m.acta));
-      const crudo = ficha.limitacion || ficha.proteccion || null;
-      const { productos, renuncia, otros } = partirRenuncia(crudo);
+      const alcance = alcanceDeLaFicha(ficha);
+      const { productos, renuncia, notas, sinClasificar: otros } = alcance;
+      const crudo = alcance.fuente === 'LIMITACION' ? ficha.limitacion : ficha.proteccion;
+      if (notas.length) notasDeTramite.push({ acta: m.acta, denominacion: m.denominacion, notas });
 
       if (!productos) {
         fallidas.push({ acta: m.acta, denominacion: m.denominacion, error: 'la ficha volvió sin (57)' });
@@ -2177,6 +2289,16 @@ router.get('/cartera/productos-completos', async (req, res: Response) => {
       quedanDespues: guardar ? quedabanAntes - reparadas.length : quedabanAntes,
       caracteresRecuperados: reparadas.reduce((a, r) => a + r.gano, 0),
       fallidas,
+      notasDeTramite: {
+        nota:
+          'Tramos de la LIMITACIÓN que son anotaciones de expediente, no límites de ' +
+          'productos — típicamente una republicación ordenada por disposición. NO se ' +
+          'guardan todavía: no hay campo para ellas. Importan porque el plazo de ' +
+          'oposición corre desde la publicación válida, y una oposición ya presentada ' +
+          'contra la anulada sigue vigente para la nueva.',
+        cantidad: notasDeTramite.length,
+        casos: notasDeTramite,
+      },
       enElTope: {
         nota:
           `Volvieron justo en ${TOPE_CAMPO} caracteres, o sea cortadas otra vez. Mirá la ` +
