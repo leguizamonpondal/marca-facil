@@ -3,17 +3,29 @@
  * ------------------------------------------------------------------
  * Endpoint:  https://ws.inpi.gob.ar/wsinpi.asmx
  * WSDL:      https://ws.inpi.gob.ar/wsinpi.asmx?WSDL
- * Doc:       https://portaltramites.inpi.gob.ar/Home/SolicitudWS
+ * Doc:       https://portaltramites.inpi.gob.ar/AutogestionWS
+ *            Manual de nodos: portaltramites.inpi.gob.ar/Documentacion/Manual_Nodos_WS_INPI.pdf
  *
  * Reemplaza el scraping con Playwright para las consultas de marcas.
  *
- * IMPORTANTE — operaciones públicas:
- *   ConsultaDenominacion   → NO requiere credenciales
- *   ConsultaCuitOTitular   → NO requiere credenciales
- *   ConsultaNotificaciones → SÍ requiere (nodo `datosUsuario`, minúscula)
- *   Ingresar_*             → SÍ requiere (nodo `DatosUsuario`, mayúscula)
+ * ⚠️ CAMBIO DEL INPI — octubre de 2026: esquema de INTEGRADORES.
  *
- * Por eso este módulo se puede usar en producción sin esperar el alta del INPI.
+ *   ConsultaDenominacion   → parámetro `tokenIntegrador` OBLIGATORIO
+ *   ConsultaCuitOTitular   → parámetro `tokenIntegrador` OBLIGATORIO
+ *   ConsultaNotificaciones → nodo `datosUsuario` (minúscula)
+ *   Ingresar_*             → nodo `DatosUsuario` (mayúscula)
+ *
+ * Las dos consultas eran públicas y sin credenciales. Desde octubre de 2026 el
+ * INPI las rechaza sin el token propio del integrador («Debe indicar un token
+ * de integrador para operar el método…»). Verificado el 23/10/2026.
+ *
+ * El `tokenIntegrador` NO depende de ningún cliente: lo obtiene el integrador
+ * al registrarse en AutogestionWS y se usa sin que nadie le delegue nada. Va
+ * en la variable de entorno `INPI_WS_TOKEN_INTEGRADOR`.
+ *
+ * `ConsultaNotificaciones` e `Ingresar_*` siguen aceptando CUIT y clave hasta
+ * el 31/12/2026. Desde el 1/1/2027 exigen `HashDelegacion` dentro de
+ * `DatosUsuario` (el «token de la relación» cliente–integrador). PENDIENTE.
  */
 import axios from 'axios';
 import { logger } from '../utils/logger';
@@ -291,19 +303,41 @@ function parsearGrillaMarcas(xml: string, operacion: string): MarcaINPIWS[] {
   });
 }
 
-// ── Operaciones públicas (sin credenciales) ───────────────────────────────────
+// ── Consultas con token de integrador ─────────────────────────────────────────
+
+/**
+ * El token propio del integrador, obligatorio para ConsultaDenominacion y
+ * ConsultaCuitOTitular desde octubre de 2026.
+ *
+ * Si falta, se lanza un error explícito ANTES de llamar al INPI. Mandar el
+ * pedido sin token sólo produce un rechazo que, más arriba, puede confundirse
+ * con «no hay resultados» — que es justamente lo que pasó el 23/10/2026.
+ */
+function tokenIntegrador(operacion: string): string {
+  const token = (process.env.INPI_WS_TOKEN_INTEGRADOR || '').trim();
+  if (!token) {
+    throw new InpiWsError(
+      'Falta la variable INPI_WS_TOKEN_INTEGRADOR. El INPI exige el token de ' +
+        'integrador para esta consulta desde octubre de 2026 (AutogestionWS).',
+      operacion
+    );
+  }
+  return token;
+}
 
 /**
  * Busca marcas por denominación.
- * Operación pública: no requiere CUIT ni clave.
+ * Exige `tokenIntegrador`; no usa CUIT ni clave.
  */
 export async function consultarDenominacionWS(denominacion: string): Promise<MarcaINPIWS[]> {
   const termino = (denominacion || '').trim();
   if (!termino) return [];
 
+  // El orden de los nodos sigue al manual: Denominacion, tokenIntegrador.
   const xml = await llamarSoap(
     'ConsultaDenominacion',
-    `<tem:Denominacion>${escaparXml(termino)}</tem:Denominacion>`
+    `<tem:Denominacion>${escaparXml(termino)}</tem:Denominacion>` +
+      `<tem:tokenIntegrador>${escaparXml(tokenIntegrador('ConsultaDenominacion'))}</tem:tokenIntegrador>`
   );
   return parsearGrillaMarcas(xml, 'ConsultaDenominacion');
 }
@@ -357,10 +391,12 @@ export async function consultarCuitOTitularWS(params: {
 
   if (!cuit && !titular) return [];
 
+  // El orden de los nodos sigue al manual: cuit, titular, tokenIntegrador.
   const xml = await llamarSoap(
     'ConsultaCuitOTitular',
     `<tem:cuit>${escaparXml(cuit)}</tem:cuit>` +
-      `<tem:titular>${escaparXml(titular)}</tem:titular>`
+      `<tem:titular>${escaparXml(titular)}</tem:titular>` +
+      `<tem:tokenIntegrador>${escaparXml(tokenIntegrador('ConsultaCuitOTitular'))}</tem:tokenIntegrador>`
   );
   return parsearGrillaMarcas(xml, 'ConsultaCuitOTitular[empieza]');
 }

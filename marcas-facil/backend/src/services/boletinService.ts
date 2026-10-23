@@ -538,6 +538,14 @@ export interface ResultadoRecuperacion {
   noEncontradas: { acta: string; titular: string }[];
   /** Actas que el WS devolvió, pero sin denominación: son figurativas puras. */
   sinDenominacionEnElWS: string[];
+  /**
+   * Consultas que el INPI RECHAZÓ (error SOAP, token, red). No son «no
+   * encontradas»: no se sabe nada de esas actas. Si es mayor que cero, el
+   * resultado de la tanda no mide la recuperación.
+   */
+  consultasRechazadas: number;
+  /** El primer motivo de rechazo, para ver qué pasó sin ir a los logs. */
+  primerRechazo: string | null;
   /** Cuántas quedan para la próxima tanda. */
   pendientesQueQuedan: number;
   milisegundos: number;
@@ -589,6 +597,8 @@ export async function recuperarDenominacionesMixtas(
   let recuperadas = 0;
   const noEncontradas: { acta: string; titular: string }[] = [];
   const sinDenominacionEnElWS: string[] = [];
+  let consultasRechazadas = 0;
+  let primerRechazo: string | null = null;
 
   for (const [titular, actas] of tanda) {
     // Las variantes se consultan una vez por titular y se reutilizan para
@@ -602,6 +612,11 @@ export async function recuperarDenominacionesMixtas(
       try {
         marcas = await buscarPorTitularWS(v);
       } catch (err: any) {
+        // ⚠️ Un rechazo NO es «el titular no tiene esa marca». Se cuenta
+        //    aparte: el 23/10/2026 el INPI rechazó todas las consultas por
+        //    falta de token y el resultado salió como «0 % recuperado».
+        consultasRechazadas++;
+        if (!primerRechazo) primerRechazo = err.message;
         logger.warn(`[Mixtas] "${v}" falló: ${err.message}`);
         continue;
       }
@@ -656,6 +671,8 @@ export async function recuperarDenominacionesMixtas(
     recuperadas,
     noEncontradas,
     sinDenominacionEnElWS,
+    consultasRechazadas,
+    primerRechazo,
     pendientesQueQuedan: Math.max(0, quedan),
     milisegundos: Date.now() - t0,
   };
