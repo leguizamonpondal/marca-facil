@@ -634,9 +634,12 @@ router.get('/mixtas/probar', async (req, res: Response) => {
     }
     const limite = Math.min(Number(req.query.limite) || 10, 50);
 
-    // Actas sin denominación de esa fecha: las que hoy no se cotejan.
+    // Actas MIXTAS sin denominación de esa fecha. Sólo tipo M: las
+    // figurativas (F) no tienen palabra que recuperar, así que incluirlas
+    // baja la tasa sin decir nada sobre el camino. El 23/10/2026 la muestra
+    // salió con 19 figurativas de 20.
     const sinDenominacion = await prisma.boletinEntrada.findMany({
-      where: { fechaBoletin: fecha, denominacion: null },
+      where: { fechaBoletin: fecha, denominacion: null, tipoInid: 'M' },
       select: { acta: true, claseNiza: true, titularNombre: true, tipoInid: true },
       take: limite,
     });
@@ -738,6 +741,13 @@ router.get('/mixtas/probar', async (req, res: Response) => {
     const encontradas = resultados.filter((r) => r.encontrada).length;
     const tasa = resultados.length ? Math.round((encontradas / resultados.length) * 100) : 0;
 
+    // ⚠️ Un rechazo del INPI no es «no la encontró». Si hubo rechazos, la
+    //    tasa no mide el camino y el veredicto tiene que decirlo, en vez de
+    //    culpar al filtro de vigentes como hizo el 23/10/2026.
+    const rechazadas = resultados.filter((r) => (r.estadoEnElWS || '').startsWith('ERROR')).length;
+    const primerRechazo =
+      resultados.find((r) => (r.estadoEnElWS || '').startsWith('ERROR'))?.estadoEnElWS || null;
+
     // La comparación que importa: el arreglo del asterisco sólo sirve si sube
     // la tasa de las actas en cotitularidad, que son las que fallaban.
     const unico = resultados.filter((r) => r.cotitulares === 1);
@@ -755,8 +765,14 @@ router.get('/mixtas/probar', async (req, res: Response) => {
         titularUnico: `${pct(unico)} (${unico.filter((r) => r.encontrada).length}/${unico.length})`,
         enCotitularidad: `${pct(varios)} (${varios.filter((r) => r.encontrada).length}/${varios.length})`,
       },
+      consultasRechazadas: rechazadas,
+      primerRechazo,
       veredicto:
-        tasa >= 70
+        rechazadas > 0
+          ? `⛔ El INPI rechazó ${rechazadas} de ${resultados.length} consultas. ` +
+            'Esta prueba NO mide la recuperación: hay que resolver el rechazo primero ' +
+            '(ver primerRechazo).'
+          : tasa >= 70
           ? '✅ El filtro de vigentes NO deja afuera las solicitudes en trámite. ' +
             'El camino por titular sirve: se programa este.'
           : tasa === 0
@@ -809,7 +825,10 @@ router.get('/mixtas/recuperar', async (req, res: Response) => {
       figurativasSinTexto: r.sinDenominacionEnElWS.length,
       sinDenominacionEnElWS: r.sinDenominacionEnElWS.slice(0, 20),
       noEncontradas: r.noEncontradas.slice(0, 20),
-      aviso: seco
+      aviso: r.consultasRechazadas > 0
+        ? `⛔ El INPI rechazó ${r.consultasRechazadas} consultas (${r.primerRechazo}). ` +
+          'Las actas de esos titulares figuran como no encontradas, pero no se sabe nada de ellas.'
+        : seco
         ? 'MODO SECO: se consultó al INPI pero NO se guardó nada. ' +
           'Para guardar, agregá &guardar=1 a la URL.'
         : r.pendientesQueQuedan > 0
